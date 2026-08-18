@@ -285,19 +285,20 @@ function buildTelegramMessage(result) {
   lines.push(`💰 Giá hiện tại: <b>${fmt(currentPrice, dec)}</b> USDT`);
   lines.push(`📐 Ngưỡng xu hướng (%thay đổi tối thiểu để xác nhận trend): ${trendInfo.trendThreshold.toFixed(2)}%`);
   lines.push('');
-  lines.push('<b>Kế hoạch DCA (Entry / SL / TP):</b>');
+  lines.push('<b>📋 Kế hoạch DCA:</b>');
 
-  const rows = ['Setup           Giá         SL          TP'];
+  // Liệt kê DỌC từng Entry (không dùng bảng cột cố định) để không bị bể dòng
+  // trên màn hình điện thoại hẹp — mỗi Entry là 1 khối riêng, luôn đọc được trọn vẹn.
   plan.entries.forEach((e) => {
-    const priceStr = fmt(e.price, dec).padEnd(11);
-    const slStr = (e.stopLoss !== null ? fmt(e.stopLoss, dec) : '--').padEnd(11);
-    const tpStr = e.disabled ? '--' : fmt(e.takeProfit, dec);
-    const nameStr = (e.disabled ? `${e.name} · CHỜ` : e.name).padEnd(16);
-    rows.push(`${nameStr}${priceStr}${slStr}${tpStr}`);
+    const statusTag = e.disabled ? '  <i>· CHỜ</i>' : '';
+    lines.push(`\n▫️ <b>${e.name}</b>${statusTag}`);
+    lines.push(`    💵 Giá vào: <b>${fmt(e.price, dec)}</b>`);
+    if (e.stopLoss !== null) lines.push(`    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`);
+    if (!e.disabled) lines.push(`    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`);
   });
-  lines.push(`<pre>${rows.join('\n')}</pre>`);
 
   if (plan.disabledCount > 0) {
+    lines.push('');
     lines.push(`⚠️ ${plan.disabledCount === 2 ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).' : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'}`);
   }
 
