@@ -332,6 +332,39 @@ async function sendTelegramMessage(text) {
   }
 }
 
+// ---------- KIỂM TRA TOKEN TELEGRAM KHI KHỞI ĐỘNG ----------
+// Gọi getMe 1 lần lúc start để phát hiện SỚM lỗi 401 Unauthorized (token sai/rỗng),
+// thay vì phải đợi đến lúc có tín hiệu thật rồi mới biết token hỏng.
+async function verifyTelegramConfig() {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn('⚠️  Chưa cấu hình TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — bot vẫn quét nhưng sẽ KHÔNG gửi Telegram.');
+    return;
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      console.error(`❌ TELEGRAM_BOT_TOKEN KHÔNG HỢP LỆ (HTTP ${res.status} - ${data.description || 'unknown'}).`);
+      console.error('   => Vào Render > Environment, kiểm tra lại TELEGRAM_BOT_TOKEN: không thừa dấu cách/xuống dòng,');
+      console.error('      lấy đúng token mới nhất từ @BotFather, sau đó bấm Save + Deploy lại.');
+      return;
+    }
+    console.log(`✅ Telegram OK — bot: @${data.result.username}`);
+
+    // Thử luôn quyền gửi tin vào đúng chat_id (phát hiện sớm lỗi "chat not found" / bot chưa được thêm vào group)
+    const testRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}`);
+    const testData = await testRes.json();
+    if (!testRes.ok || !testData.ok) {
+      console.error(`❌ TELEGRAM_CHAT_ID có vấn đề (HTTP ${testRes.status} - ${testData.description || 'unknown'}).`);
+      console.error('   => Kiểm tra lại chat_id, đảm bảo đã nhắn tin cho bot (hoặc thêm bot vào group/channel) trước.');
+    } else {
+      console.log(`✅ Chat ID OK — gửi tới: ${testData.result.title || testData.result.username || testData.result.id}`);
+    }
+  } catch (err) {
+    console.error(`❌ Không kiểm tra được cấu hình Telegram: ${err.message}`);
+  }
+}
+
 // ---------- VÒNG QUÉT CHÍNH ----------
 
 function nowStr() {
@@ -378,5 +411,8 @@ http
 
 // ---------- KHỞI ĐỘNG ----------
 
-runScanCycle();
-setInterval(runScanCycle, SCAN_INTERVAL_MINUTES * 60 * 1000);
+(async () => {
+  await verifyTelegramConfig();
+  runScanCycle();
+  setInterval(runScanCycle, SCAN_INTERVAL_MINUTES * 60 * 1000);
+})();
