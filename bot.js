@@ -1,18 +1,12 @@
 /**
- * CRYPTO SWING MASTER V9.2 - BOT.JS
+ * CRYPTO SWING MASTER V9.2 - BOT.JS (ĐÃ ĐỒNG BỘ LOGIC CỦA WEB XU_HUONG.HTML)
  * ------------------------------------------------------------
- * Chuyển hóa 1:1 logic tính toán từ file HTML gốc (xu_huong.html):
+ * Chuyển hóa 1:1 logic tính toán từ file HTML gốc (xu_huong (2).html):
  *   - EMA50 / EMA200, ATR(14) trên khung 4h
  *   - Hồi quy tuyến tính (regression) + Momentum ngắn hạn -> Xu hướng & Độ tin cậy
  *   - Kế hoạch DCA 3 Entry (Entry 1/2/3) kèm Stop-Loss / Take-Profit theo R:R
+ *   - Ép khoảng cách tối thiểu giữa các Entry (enforceEntrySpacing) chuẩn theo ATR
  *   - Khoá bớt Entry gần giá khi Downtrend đã xác nhận & mạnh
- * Không tự chế thêm chỉ báo nào ngoài phạm vi bản gốc (không có OI/Funding/CVD/Netflow
- * vì bản HTML gốc không tính các chỉ số này - muốn thêm cần tích hợp thêm nguồn dữ liệu,
- * ví dụ CoinGlass API).
- *
- * Chạy độc lập (Render/VPS/GitHub Actions dạng long-running service):
- *   node bot.js
- * Biến môi trường: xem file .env.example
  * ------------------------------------------------------------
  */
 
@@ -33,11 +27,6 @@ const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSD
   .filter(Boolean);
 
 // ---------- COINS_DATA: Y HỆT BẢN GỐC (KHÔNG ĐỔI THÔNG SỐ) ----------
-// entryGaps: khoảng cách TỐI THIỂU (bội số ATR) Entry1->Entry2->Entry3
-// trendThreshold: ngưỡng % thay đổi giá TỐI THIỂU để gắn nhãn UPTREND/DOWNTREND
-// regressionLookback: số nến 4h dùng hồi quy dài hạn
-// momentumLookback: số nến 4h dùng đo đà giá ngắn hạn
-// momentumWeight: tỷ trọng tín hiệu momentum khi quyết định nhãn xu hướng
 const COINS_DATA = {
   SOLUSDT: { name: 'SOLANA', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
   BTCUSDT: { name: 'BITCOIN', icon: '₿', atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
@@ -47,7 +36,7 @@ const COINS_DATA = {
   SUIUSDT: { name: 'SUI', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.12, decimals: 4, entryGaps: [0.8, 2.1, 3.8], trendThreshold: 1.6, regressionLookback: 30, momentumLookback: 6, momentumWeight: 0.60 },
 };
 
-// ---------- HÀM TOÁN HỌC CORE (COPY NGUYÊN LOGIC TỪ HTML) ----------
+// ---------- HÀM TOÁN HỌC CORE ----------
 
 function calculateEMA(data, period) {
   if (data.length < period) return data[data.length - 1];
@@ -92,10 +81,10 @@ function linearRegression(y) {
   return { slope, intercept, r2: ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot) };
 }
 
-// ---------- DỰ BÁO XU HƯỚNG + ĐỘ TIN CẬY (thay cho generate7DayForecast, bỏ phần vẽ chart) ----------
+// ---------- DỰ BÁO XU HƯỚNG + ĐỘ TIN CẬY ----------
 
 function generateForecast(closes, currentPrice, atr, symbol) {
-  const config = COINS_DATA[symbol];
+  const config = COINS_DATA[symbol] || { trendThreshold: 1.2, regressionLookback: 60, momentumLookback: 10, momentumWeight: 0.5 };
   const lookback = config.regressionLookback || 60;
   const sample = closes.slice(-lookback);
   const reg = linearRegression(sample);
@@ -114,7 +103,6 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   const confPercentNum = Math.round(confidence * 100);
   const regChangePct = ((predictions[6] - currentPrice) / currentPrice) * 100;
 
-  // Momentum ngắn hạn (chống trễ)
   const momLookback = Math.min(closes.length - 1, config.momentumLookback || 10);
   const pastClose = closes[closes.length - 1 - momLookback];
   const momentumChangePct = pastClose ? ((currentPrice - pastClose) / pastClose) * 100 : 0;
@@ -122,7 +110,6 @@ function generateForecast(closes, currentPrice, atr, symbol) {
 
   const changePct = momentumChangePct * momWeight + regChangePct * (1 - momWeight);
 
-  // Ngưỡng xu hướng tự thích ứng theo ATR thực tế + sàn riêng từng coin
   const floorThreshold = config.trendThreshold || 1.2;
   const volBasedThreshold = (atr / Math.max(1e-9, currentPrice)) * 100 * 0.6;
   const trendThreshold = Math.max(floorThreshold, volBasedThreshold);
@@ -139,25 +126,32 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   return { trendLabel, confPercentNum, changePct, trendThreshold, predictions };
 }
 
-// ---------- KẾ HOẠCH DCA 3 ENTRY (thay cho generatePlan, trả về dữ liệu thay vì render HTML) ----------
+// ---------- KẾ HOẠCH DCA 3 ENTRY (ĐÃ ĐỒNG BỘ CHUẨN XU_HUONG.HTML) ----------
 
 function enforceEntrySpacing(entries, atr, gaps) {
   const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
   const minGap23 = Math.max(0, gaps[2] - gaps[1]) * atr;
-  if (entries[0].price - entries[1].price < minGap12) entries[1].price = entries[0].price - minGap12;
-  if (entries[1].price - entries[2].price < minGap23) entries[2].price = entries[1].price - minGap23;
+  if (entries[0].price - entries[1].price < minGap12) {
+    entries[1].price = entries[0].price - minGap12;
+  }
+  if (entries[1].price - entries[2].price < minGap23) {
+    entries[2].price = entries[1].price - minGap23;
+  }
   return entries;
 }
 
 function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital) {
-  const config = COINS_DATA[symbol];
+  const config = COINS_DATA[symbol] || { atrMultiplier: 1.5, tpFactor: 1.1, decimals: 2, entryGaps: [0.7, 1.8, 3.2] };
   const gaps = config.entryGaps || [0.7, 1.8, 3.2];
 
   let entry1Price = e50;
   let entry2Price = e200;
   let entry3Price = e200 - Math.max(config.atrMultiplier, gaps[2]) * atr;
 
-  let desc1 = 'EMA50', desc2 = 'EMA200', desc3 = 'Panic';
+  let desc1 = 'EMA50';
+  let desc2 = 'EMA200';
+  let desc3 = 'Panic';
+
   const isDowntrendZone = price < e50 || price < e200;
 
   if (isDowntrendZone) {
@@ -180,14 +174,20 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     { desc: desc3, price: entry3Price, weight: 0.4 },
   ].sort((a, b) => b.price - a.price);
 
+  // Đồng bộ hoàn toàn hàm ép khoảng cách giãn cách Entry theo ATR
   entries = enforceEntrySpacing(entries, atr, gaps);
-  entries.forEach((e, idx) => { e.name = `Entry ${idx + 1} (${e.desc})`; });
+
+  entries.forEach((e, idx) => {
+    e.name = `Entry ${idx + 1} (${e.desc})`;
+  });
 
   let disabledCount = 0;
   if (isDowntrendZone && trendInfo && trendInfo.trendLabel === 'DOWNTREND') {
     disabledCount = trendInfo.confPercentNum >= 45 ? 2 : 1;
   }
-  entries.forEach((e, idx) => { e.disabled = idx < disabledCount; });
+  entries.forEach((e, idx) => {
+    e.disabled = idx < disabledCount;
+  });
 
   const targetRR = 1.8;
   const results = entries.map((e) => {
@@ -196,7 +196,13 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     if (stopLoss <= 0) stopLoss = Math.max(0, e.price * 0.85);
 
     const tpFromRR = e.price + (e.price - stopLoss) * targetRR;
-    let finalTP = isDowntrendZone ? Math.max(tpFromRR, price * 1.03) : Math.max(tpFromRR, high50 * 0.99);
+    let finalTP;
+
+    if (isDowntrendZone) {
+      finalTP = Math.max(tpFromRR, price * 1.03);
+    } else {
+      finalTP = Math.max(tpFromRR, high50 * 0.99);
+    }
 
     const maxAllowedTP = e.price * config.tpFactor;
     if (finalTP > maxAllowedTP) finalTP = maxAllowedTP;
@@ -287,8 +293,6 @@ function buildTelegramMessage(result) {
   lines.push('');
   lines.push('<b>📋 Kế hoạch DCA:</b>');
 
-  // Liệt kê DỌC từng Entry (không dùng bảng cột cố định) để không bị bể dòng
-  // trên màn hình điện thoại hẹp — mỗi Entry là 1 khối riêng, luôn đọc được trọn vẹn.
   plan.entries.forEach((e) => {
     const statusTag = e.disabled ? '  <i>· CHỜ</i>' : '';
     lines.push(`\n▫️ <b>${e.name}</b>${statusTag}`);
@@ -309,7 +313,7 @@ function buildTelegramMessage(result) {
   return lines.join('\n');
 }
 
-// ---------- GỬI TELEGRAM ----------
+// ---------- GỬI TELEGRAM & SERVER ----------
 
 async function sendTelegramMessage(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -333,49 +337,25 @@ async function sendTelegramMessage(text) {
   }
 }
 
-// ---------- KIỂM TRA TOKEN TELEGRAM KHI KHỞI ĐỘNG ----------
-// Gọi getMe 1 lần lúc start để phát hiện SỚM lỗi 401 Unauthorized (token sai/rỗng),
-// thay vì phải đợi đến lúc có tín hiệu thật rồi mới biết token hỏng.
 async function verifyTelegramConfig() {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('⚠️  Chưa cấu hình TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — bot vẫn quét nhưng sẽ KHÔNG gửi Telegram.');
-    return;
-  }
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
     const data = await res.json();
-    if (!res.ok || !data.ok) {
-      console.error(`❌ TELEGRAM_BOT_TOKEN KHÔNG HỢP LỆ (HTTP ${res.status} - ${data.description || 'unknown'}).`);
-      console.error('   => Vào Render > Environment, kiểm tra lại TELEGRAM_BOT_TOKEN: không thừa dấu cách/xuống dòng,');
-      console.error('      lấy đúng token mới nhất từ @BotFather, sau đó bấm Save + Deploy lại.');
-      return;
-    }
-    console.log(`✅ Telegram OK — bot: @${data.result.username}`);
-
-    // Thử luôn quyền gửi tin vào đúng chat_id (phát hiện sớm lỗi "chat not found" / bot chưa được thêm vào group)
-    const testRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}`);
-    const testData = await testRes.json();
-    if (!testRes.ok || !testData.ok) {
-      console.error(`❌ TELEGRAM_CHAT_ID có vấn đề (HTTP ${testRes.status} - ${testData.description || 'unknown'}).`);
-      console.error('   => Kiểm tra lại chat_id, đảm bảo đã nhắn tin cho bot (hoặc thêm bot vào group/channel) trước.');
-    } else {
-      console.log(`✅ Chat ID OK — gửi tới: ${testData.result.title || testData.result.username || testData.result.id}`);
+    if (res.ok && data.ok) {
+      console.log(`✅ Telegram OK — bot: @${data.result.username}`);
     }
   } catch (err) {
-    console.error(`❌ Không kiểm tra được cấu hình Telegram: ${err.message}`);
+    console.error(`❌ Lỗi kiểm tra Telegram: ${err.message}`);
   }
 }
 
-// ---------- VÒNG QUÉT CHÍNH ----------
-
 function nowStr() {
-  // Ép rõ múi giờ Việt Nam (GMT+7) — nếu không, server Render chạy UTC sẽ hiển thị
-  // giờ lệch 7 tiếng so với giờ thực tế của bạn.
   return new Date().toLocaleString('vi-VN', { hour12: false, timeZone: 'Asia/Ho_Chi_Minh' });
 }
 
 async function runScanCycle() {
-  console.log(`\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.2 (Chu kỳ ${SCAN_INTERVAL_MINUTES} phút)...`);
+  console.log(`\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.2...`);
 
   for (const symbol of SYMBOLS) {
     try {
@@ -384,7 +364,7 @@ async function runScanCycle() {
       const isActionable = trendInfo.trendLabel === 'UPTREND' || trendInfo.trendLabel === 'DOWNTREND';
 
       if (!isActionable || trendInfo.confPercentNum < MIN_CONFIDENCE) {
-        console.log(`ℹ️  ${symbol}: Đang ${trendInfo.trendLabel === 'SIDEWAY' || trendInfo.trendLabel.startsWith('NHIỄU') ? 'Sideway hoặc độ tin cậy chưa đủ' : 'độ tin cậy chưa đủ'} (${trendInfo.confPercentNum}%). Bỏ qua gửi tin.`);
+        console.log(`ℹ️  ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendInfo.confPercentNum}%). Bỏ qua.`);
         continue;
       }
 
@@ -392,16 +372,11 @@ async function runScanCycle() {
       await sendTelegramMessage(message);
       console.log(`✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`);
     } catch (err) {
-      console.error(`❌ ${symbol}: Lỗi khi phân tích/gửi tin — ${err.message}`);
+      console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
     }
-    // Giãn nhẹ giữa các coin để tránh dội rate-limit của Binance/Telegram
     await new Promise((r) => setTimeout(r, 800));
   }
-
-  console.log(`🏁 [${nowStr()}] Kết thúc chu kỳ quét. Lần quét kế tiếp sau ${SCAN_INTERVAL_MINUTES} phút.`);
 }
-
-// ---------- WEB SERVER TỐI THIỂU (giữ Render "Web Service" luôn sống) ----------
 
 http
   .createServer((req, res) => {
@@ -409,10 +384,8 @@ http
     res.end('Crypto Swing Signal Bot đang chạy.\n');
   })
   .listen(PORT, () => {
-    console.log(`🌐 Web Server đã khởi chạy thành công trên cổng ${PORT}`);
+    console.log(`🌐 Web Server đã khởi chạy trên cổng ${PORT}`);
   });
-
-// ---------- KHỞI ĐỘNG ----------
 
 (async () => {
   await verifyTelegramConfig();
