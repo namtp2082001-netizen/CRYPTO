@@ -303,7 +303,7 @@ function buildTelegramMessage(result) {
 
   lines.push('');
   lines.push(`🎯 <b>Khuyến nghị:</b> ${actionRecommendation(trendInfo)}`);
-  lines.push(`⏱ Cập nhật: ${new Date().toLocaleString('vi-VN', { hour12: false })}`);
+  lines.push(`⏱ Cập nhật: ${new Date().toLocaleString('vi-VN', { hour12: false, timeZone: 'Asia/Ho_Chi_Minh' })}`);
 
   return lines.join('\n');
 }
@@ -368,7 +368,9 @@ async function verifyTelegramConfig() {
 // ---------- VÒNG QUÉT CHÍNH ----------
 
 function nowStr() {
-  return new Date().toLocaleString('vi-VN', { hour12: false });
+  // Ép rõ múi giờ Việt Nam (GMT+7) — nếu không, server Render chạy UTC sẽ hiển thị
+  // giờ lệch 7 tiếng so với giờ thực tế của bạn.
+  return new Date().toLocaleString('vi-VN', { hour12: false, timeZone: 'Asia/Ho_Chi_Minh' });
 }
 
 async function runScanCycle() {
