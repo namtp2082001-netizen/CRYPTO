@@ -2,7 +2,7 @@ const http = require('http');
 const axios = require('axios');
 
 // ==========================================
-// 1. TẠO HTTP SERVER (ĐỂ DÙNG FREE TRÊN RENDER WEB SERVICE)
+// 1. TẠO HTTP SERVER (DÙNG CHO RENDER WEB SERVICE FREE $0)
 // ==========================================
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -17,9 +17,11 @@ http.createServer((req, res) => {
 // ==========================================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '15', 10);
 
-// DATA CẤU HÌNH THEO ĐÚNG LOGIC V9.2
+// Mặc định 120 phút (2 tiếng) quét 1 lần nếu không cài SCAN_INTERVAL_MINUTES trên Render
+const INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
+
+// DATA CẤU HÌNH PHÂN TÍCH THEO CHUẨN LOGIC V9.2
 const COINS_DATA = {
     "SOLUSDT": { name: "SOLANA", atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
     "BTCUSDT": { name: "BITCOIN", atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
@@ -30,7 +32,7 @@ const COINS_DATA = {
 // 3. CÁC HÀM TÍNH TOÁN KỸ THUẬT V9.2
 // ==========================================
 
-// Gửi thông báo về Telegram
+// Hàm gửi thông báo về Telegram
 async function sendTelegramAlert(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
         console.error("❌ Chưa cấu hình TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong Environment Variables!");
@@ -49,7 +51,7 @@ async function sendTelegramAlert(message) {
     }
 }
 
-// Lấy nến từ Binance Spot
+// Lấy danh sách nến từ Binance Spot
 async function fetchKlines(symbol, interval = '15m', limit = 100) {
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const response = await axios.get(url);
@@ -63,7 +65,7 @@ async function fetchKlines(symbol, interval = '15m', limit = 100) {
     }));
 }
 
-// Tính ATR
+// Tính ATR (Average True Range)
 function calculateATR(klines, period = 14) {
     let trs = [];
     for (let i = 1; i < klines.length; i++) {
@@ -77,7 +79,7 @@ function calculateATR(klines, period = 14) {
     return recentTrs.reduce((a, b) => a + b, 0) / period;
 }
 
-// Tính Hồi quy tuyến tính (Linear Regression)
+// Tính độ dốc Hồi quy tuyến tính (Linear Regression Slope)
 function calculateLinearRegressionSlope(prices) {
     const n = prices.length;
     let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
@@ -87,11 +89,10 @@ function calculateLinearRegressionSlope(prices) {
         sumXY += i * prices[i];
         sumXX += i * i;
     }
-    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-    return slope;
+    return (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
 }
 
-// Phân tích Xu hướng & Độ tin cậy (Confidence %)
+// Phân tích Xu hướng & Độ tin cậy (v9.2 Algorithmic Score)
 function analyzeTrendV92(klines, config) {
     const closes = klines.map(k => k.close);
     const regPrices = closes.slice(-config.regressionLookback);
@@ -117,7 +118,7 @@ function analyzeTrendV92(klines, config) {
 // 4. MÁY QUÉT THỊ TRƯỜNG TỰ ĐỘNG
 // ==========================================
 async function runScanJob() {
-    console.log(`\n🔍 [${new Date().toLocaleString('vi-VN')}] Bắt đầu tiến trình quét v9.2...`);
+    console.log(`\n🔍 [${new Date().toLocaleString('vi-VN')}] Bắt đầu tiến trình quét v9.2 (Chu kỳ ${INTERVAL_MINUTES} phút)...`);
 
     for (const [symbol, config] of Object.entries(COINS_DATA)) {
         try {
@@ -137,7 +138,7 @@ async function runScanJob() {
                 { price: entry3, weight: 0.30, tp: entry3 * config.tpFactor, disabled: currentPrice > entry1 }
             ];
 
-            // BẮN TELEGRAM NẾU ĐẠT ĐIỀU KIỆN (Có UPTREND/DOWNTREND rõ ràng với độ tin cậy >= 40%)
+            // BẮN TELEGRAM NẾU ĐẠT ĐIỀU KIỆN (Có UPTREND/DOWNTREND với độ tin cậy >= 40%)
             if (trendResult.confPercentNum >= 40 && trendResult.trendLabel !== 'SIDEWAY') {
                 let msg = `📊 <b>SWING MASTER V9.2 REPORT</b>\n`;
                 msg += `Coin: <b>${config.name} (${symbol})</b>\n`;
@@ -156,7 +157,7 @@ async function runScanJob() {
                 msg += `\n⏰ <i>Time: ${new Date().toLocaleTimeString('vi-VN')}</i>`;
                 await sendTelegramAlert(msg);
             } else {
-                console.log(`ℹ️ ${symbol}: Thi hành Sideway hoặc độ tin cậy chưa đủ (${trendResult.confPercentNum}%). Bỏ qua gửi tin.`);
+                console.log(`ℹ️ ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendResult.confPercentNum}%). Bỏ qua gửi tin.`);
             }
 
         } catch (err) {
@@ -168,8 +169,8 @@ async function runScanJob() {
 // ==========================================
 // 5. KHỞI CHẠY ĐỊNH KỲ
 // ==========================================
-// Chạy quét ngay lập tức khi khởi động
+// Chạy ngay 1 lần đầu tiên khi bot khởi động
 runScanJob();
 
-// Đặt lịch chạy định kỳ theo số phút thiết lập
+// Đặt lịch tự động quét mỗi INTERVAL_MINUTES phút (mặc định 120 phút)
 setInterval(runScanJob, INTERVAL_MINUTES * 60 * 1000);
