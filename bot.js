@@ -376,10 +376,22 @@ async function runScanCycle() {
   }
 }
 
+// KHỞI TẠO SERVER & XỬ LÝ TRIGGER KHI TRUY CẬP LINK / CRONJOB PING
 http
   .createServer((req, res) => {
+    // Bỏ qua request lấy favicon icon của trình duyệt
+    if (req.url === '/favicon.ico') {
+      res.writeHead(204);
+      return res.end();
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Crypto Swing Signal Bot đang chạy.\n');
+    console.log(`\n🔔 [${nowStr()}] Nhận request kích hoạt từ Web/Cronjob...`);
+
+    // Kích hoạt tiến trình quét ngay lập tức
+    runScanCycle().catch((err) => console.error(`❌ Lỗi quét: ${err.message}`));
+
+    res.end('Crypto Swing Signal Bot v9.2: Đã nhận lệnh và đang tiến hành quét thị trường!\n');
   })
   .listen(PORT, () => {
     console.log(`🌐 Web Server đã khởi chạy trên cổng ${PORT}`);
