@@ -1,12 +1,7 @@
 /**
- * CRYPTO SWING MASTER V9.2 - BOT.JS (ĐÃ ĐỒNG BỘ LOGIC CỦA WEB XU_HUONG.HTML)
+ * CRYPTO SWING MASTER V9.2 - BOT.JS
  * ------------------------------------------------------------
- * Chuyển hóa 1:1 logic tính toán từ file HTML gốc (xu_huong (2).html):
- *   - EMA50 / EMA200, ATR(14) trên khung 4h
- *   - Hồi quy tuyến tính (regression) + Momentum ngắn hạn -> Xu hướng & Độ tin cậy
- *   - Kế hoạch DCA 3 Entry (Entry 1/2/3) kèm Stop-Loss / Take-Profit theo R:R
- *   - Ép khoảng cách tối thiểu giữa các Entry (enforceEntrySpacing) chuẩn theo ATR
- *   - Khoá bớt Entry gần giá khi Downtrend đã xác nhận & mạnh
+ * Đã đồng bộ 100% logic tính Entry với Web Dashboard (xu_huong.html)
  * ------------------------------------------------------------
  */
 
@@ -26,7 +21,7 @@ const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSD
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
 
-// ---------- COINS_DATA: Y HỆT BẢN GỐC (KHÔNG ĐỔI THÔNG SỐ) ----------
+// ---------- COINS_DATA ----------
 const COINS_DATA = {
   SOLUSDT: { name: 'SOLANA', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
   BTCUSDT: { name: 'BITCOIN', icon: '₿', atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
@@ -126,7 +121,7 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   return { trendLabel, confPercentNum, changePct, trendThreshold, predictions };
 }
 
-// ---------- KẾ HOẠCH DCA 3 ENTRY (ĐÃ ĐỒNG BỘ CHUẨN XU_HUONG.HTML) ----------
+// ---------- LOGIC TÍNH ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR (ĐỒNG BỘ 100% VỚI HTML) ----------
 
 function enforceEntrySpacing(entries, atr, gaps) {
   const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
@@ -144,13 +139,8 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
   const config = COINS_DATA[symbol] || { atrMultiplier: 1.5, tpFactor: 1.1, decimals: 2, entryGaps: [0.7, 1.8, 3.2] };
   const gaps = config.entryGaps || [0.7, 1.8, 3.2];
 
-  let entry1Price = e50;
-  let entry2Price = e200;
-  let entry3Price = e200 - Math.max(config.atrMultiplier, gaps[2]) * atr;
-
-  let desc1 = 'EMA50';
-  let desc2 = 'EMA200';
-  let desc3 = 'Panic';
+  let entry1Price, entry2Price, entry3Price;
+  let desc1, desc2, desc3;
 
   const isDowntrendZone = price < e50 || price < e200;
 
@@ -166,6 +156,15 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     desc1 = 'Hỗ trợ 1';
     desc2 = 'Hỗ trợ 2';
     desc3 = 'Panic';
+  } else {
+    // LOGIC ENTRY UPTREND ĐÃ ĐƯỢC ĐỒNG BỘ Y HỆT WEB DASHBOARD (XU_HUONG.HTML)
+    entry1Price = price - gaps[0] * atr;
+    entry2Price = Math.min(e50, price - gaps[1] * atr);
+    entry3Price = Math.min(e200, price - gaps[2] * atr);
+
+    desc1 = 'Pullback nhanh';
+    desc2 = 'EMA50 / Pullback sâu';
+    desc3 = 'EMA200 / Panic';
   }
 
   let entries = [
@@ -174,7 +173,6 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     { desc: desc3, price: entry3Price, weight: 0.4 },
   ].sort((a, b) => b.price - a.price);
 
-  // Đồng bộ hoàn toàn hàm ép khoảng cách giãn cách Entry theo ATR
   entries = enforceEntrySpacing(entries, atr, gaps);
 
   entries.forEach((e, idx) => {
@@ -191,7 +189,7 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
 
   const targetRR = 1.8;
   const results = entries.map((e) => {
-    const isPanic = e.name.includes('Entry 3');
+    const isPanic = e.name.includes('Panic') || e.name.includes('Entry 3');
     let stopLoss = e.price - config.atrMultiplier * atr;
     if (stopLoss <= 0) stopLoss = Math.max(0, e.price * 0.85);
 
