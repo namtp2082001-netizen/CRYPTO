@@ -2,6 +2,7 @@
  * CRYPTO SWING MASTER V9.2 - BOT.JS
  * ------------------------------------------------------------
  * Đã đồng bộ 100% logic tính Entry với Web Dashboard (xu_huong.html)
+ * Đã tối ưu HTTP Server riêng cho Cron-job Ping (/ping -> OK)
  * ------------------------------------------------------------
  */
 
@@ -376,22 +377,32 @@ async function runScanCycle() {
   }
 }
 
-// KHỞI TẠO SERVER & XỬ LÝ TRIGGER KHI TRUY CẬP LINK / CRONJOB PING
+// KHỞI TẠO SERVER & XỬ LÝ REQUEST PING (KEEP ALIVE) / SCAN TRIGGER
 http
   .createServer((req, res) => {
-    // Bỏ qua request lấy favicon icon của trình duyệt
+    // 1. Bỏ qua favicon
     if (req.url === '/favicon.ico') {
       res.writeHead(204);
       return res.end();
     }
 
+    // 2. Trả lời ngay cho Cron-job Ping (/ping hoặc phương thức HEAD)
+    if (req.url === '/ping' || req.method === 'HEAD') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('OK');
+    }
+
+    // 3. Nếu gọi /scan thì mới kích hoạt quét thị trường thủ công
+    if (req.url === '/scan') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      console.log(`\n🔔 [${nowStr()}] Nhận lệnh kích hoạt quét thủ công...`);
+      runScanCycle().catch((err) => console.error(`❌ Lỗi quét: ${err.message}`));
+      return res.end('Crypto Swing Signal Bot v9.2: Đã nhận lệnh và đang tiến hành quét thị trường!\n');
+    }
+
+    // 4. Mặc định trả về "OK" siêu nhẹ cho các truy cập đường dẫn khác
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    console.log(`\n🔔 [${nowStr()}] Nhận request kích hoạt từ Web/Cronjob...`);
-
-    // Kích hoạt tiến trình quét ngay lập tức
-    runScanCycle().catch((err) => console.error(`❌ Lỗi quét: ${err.message}`));
-
-    res.end('Crypto Swing Signal Bot v9.2: Đã nhận lệnh và đang tiến hành quét thị trường!\n');
+    res.end('OK');
   })
   .listen(PORT, () => {
     console.log(`🌐 Web Server đã khởi chạy trên cổng ${PORT}`);
