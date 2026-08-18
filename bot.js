@@ -18,14 +18,17 @@ http.createServer((req, res) => {
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// Mặc định 120 phút (2 tiếng) quét 1 lần nếu không cài SCAN_INTERVAL_MINUTES trên Render
+// Cấu hình chu kỳ quét 120 phút (2 tiếng) một lần
 const INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
 
-// DATA CẤU HÌNH PHÂN TÍCH THEO CHUẨN LOGIC V9.2
+// DATA CẤU HÌNH ĐẦY ĐỦ 6 COIN CHUẨN THEO XU_HUONG_UPDATE.HTML
 const COINS_DATA = {
-    "SOLUSDT": { name: "SOLANA", atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
-    "BTCUSDT": { name: "BITCOIN", atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
-    "ETHUSDT": { name: "ETHEREUM", atrMultiplier: 1.5, tpFactor: 1.08, decimals: 2, entryGaps: [0.7, 1.8, 3.2], trendThreshold: 1.0, regressionLookback: 40, momentumLookback: 10, momentumWeight: 0.50 }
+    "SOLUSDT":  { name: "SOLANA",    atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8,  momentumWeight: 0.55 },
+    "BTCUSDT":  { name: "BITCOIN",   atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
+    "ETHUSDT":  { name: "ETHEREUM",  atrMultiplier: 1.5, tpFactor: 1.08, decimals: 2, entryGaps: [0.7, 1.8, 3.2], trendThreshold: 1.0, regressionLookback: 42, momentumLookback: 10, momentumWeight: 0.50 },
+    "BNBUSDT":  { name: "BNB CHAIN", atrMultiplier: 1.5, tpFactor: 1.08, decimals: 2, entryGaps: [0.7, 1.8, 3.2], trendThreshold: 1.0, regressionLookback: 42, momentumLookback: 10, momentumWeight: 0.50 },
+    "LINKUSDT": { name: "CHAINLINK", atrMultiplier: 2.2, tpFactor: 1.18, decimals: 3, entryGaps: [0.9, 2.2, 4.0], trendThreshold: 1.5, regressionLookback: 34, momentumLookback: 8,  momentumWeight: 0.55 },
+    "SUIUSDT":  { name: "SUI",       atrMultiplier: 2.0, tpFactor: 1.12, decimals: 4, entryGaps: [0.8, 2.1, 3.8], trendThreshold: 1.6, regressionLookback: 30, momentumLookback: 6,  momentumWeight: 0.60 }
 };
 
 // ==========================================
