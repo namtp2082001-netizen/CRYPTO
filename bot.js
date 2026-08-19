@@ -660,13 +660,14 @@ const server = http.createServer((req, res) => {
     return sendText(res, 200, 'OK');
   }
 
+  // Phản hồi siêu nhẹ cho /ping, /health và các đường dẫn gốc
   if (pathname === '/' || pathname === '/ping' || pathname === '/health') {
     return sendText(res, 200, 'OK');
   }
 
   // Cron-job.org gọi endpoint này.
-  // Response trả ngay, scan chạy phía sau.
-  if (pathname === '/scan') {
+  // Trả về response cực kỳ gọn nhẹ (vài chữ) ngay lập tức để chống lỗi "output too large".
+  if (pathname === '/scan' || pathname === '/scan/') {
     const alreadyRunning = Boolean(scanPromise);
 
     console.log(
@@ -682,9 +683,7 @@ const server = http.createServer((req, res) => {
     return sendText(
       res,
       200,
-      alreadyRunning
-        ? 'SCAN_IN_PROGRESS'
-        : 'SCAN_STARTED'
+      alreadyRunning ? 'SCAN_IN_PROGRESS' : 'OK'
     );
   }
 
