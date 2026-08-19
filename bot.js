@@ -1,16 +1,5 @@
 /**
- * CRYPTO SWING MASTER V9.2 - BOT.JS
- * ------------------------------------------------------------
- * GIỮ NGUYÊN 100% LOGIC ENTRY / TP / TREND
- * Chỉ tối ưu phần KẾT NỐI:
- * - Timeout cho mọi HTTP request
- * - Retry + backoff khi Binance/Telegram lỗi tạm thời
- * - Tự động đổi Binance endpoint khi endpoint chính lỗi
- * - Không để scan bị chạy chồng nhau
- * - /ping, /scan, /health luôn trả response cực nhẹ cho Cron-job.org
- * - Hỗ trợ /scan?xxx và /scan/
- * - Không làm thay đổi công thức Entry / TP hiện tại
- * ------------------------------------------------------------
+ * CRYPTO SWING MASTER V9.2 - BOT.JS (FIXED RATE LIMIT)
  */
 
 'use strict';
@@ -31,10 +20,8 @@ const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSD
 // ---------- NETWORK CONFIG ----------
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '15000', 10);
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
-const RETRY_BASE_MS = parseInt(process.env.RETRY_BASE_MS || '700', 10);
+const RETRY_BASE_MS = parseInt(process.env.RETRY_BASE_MS || '1000', 10);
 
-// Binance public API có nhiều hostname.
-// Nếu api.binance.com lỗi tạm thời, bot sẽ tự thử endpoint khác.
 const BINANCE_HOSTS = [
   'https://api.binance.com',
   'https://api1.binance.com',
@@ -173,8 +160,7 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   };
 }
 
-// ---------- LOGIC ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR ----------
-// GIỮ NGUYÊN LOGIC ENTRY HIỆN TẠI
+// ---------- LOGIC ENTRY DẢI DỰ PHÒNG ----------
 
 function enforceEntrySpacing(entries, atr, gaps) {
   const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
@@ -292,6 +278,7 @@ function sleep(ms) {
 
 function isRetryableStatus(status) {
   return status === 408 ||
+    status === 418 ||
     status === 425 ||
     status === 429 ||
     status === 500 ||
@@ -347,7 +334,8 @@ async function fetchJSON(url, options = {}) {
       if (attempt === MAX_RETRIES) break;
     }
 
-    const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+    // Tăng thời gian chờ backoff nếu gặp lỗi 418/429
+    const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500);
     console.warn(`⚠️ Retry ${attempt}/${MAX_RETRIES - 1}: ${url} — ${lastError.message} — chờ ${wait}ms`);
     await sleep(wait);
   }
@@ -404,16 +392,8 @@ async function analyzeCoin(symbol, capital) {
     throw new Error(`Không có cấu hình cho symbol ${symbol}`);
   }
 
-  const [pData, kData] = await Promise.all([
-    fetchBinanceJSON(`/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`),
-    fetchBinanceJSON(`/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=300`),
-  ]);
-
-  const currentPrice = parseFloat(pData.price);
-
-  if (!Number.isFinite(currentPrice)) {
-    throw new Error(`Giá hiện tại ${symbol} không hợp lệ`);
-  }
+  // Tối ưu: Chỉ gọi klines để giảm request (lấy giá hiện tại từ cây nến kline cuối)
+  const kData = await fetchBinanceJSON(`/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=300`);
 
   if (!Array.isArray(kData) || kData.length < 200) {
     throw new Error(`Kline ${symbol} không đủ dữ liệu: ${Array.isArray(kData) ? kData.length : 0}`);
@@ -422,6 +402,12 @@ async function analyzeCoin(symbol, capital) {
   const closes = kData.map((d) => parseFloat(d[4]));
   const highs = kData.map((d) => parseFloat(d[2]));
   const lows = kData.map((d) => parseFloat(d[3]));
+
+  const currentPrice = closes[closes.length - 1];
+
+  if (!Number.isFinite(currentPrice)) {
+    throw new Error(`Giá hiện tại ${symbol} không hợp lệ`);
+  }
 
   const ema50 = calculateEMA(closes, 50);
   const ema200 = calculateEMA(closes, 200);
@@ -571,7 +557,6 @@ function nowStr() {
 // ---------- SCAN ----------
 
 async function runScanCycle() {
-  // Chống 2 scan chạy cùng lúc nếu Cron-job.org gửi request trùng nhau.
   if (scanPromise) {
     console.log(`ℹ️ [${nowStr()}] Scan đang chạy — bỏ qua lần kích hoạt trùng.`);
     return scanPromise;
@@ -616,7 +601,8 @@ async function runScanCycle() {
         console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
       }
 
-      await sleep(800);
+      // Tăng delay lên 1.5s giữa các coin để tránh bùng nổ Request Weight
+      await sleep(1500);
     }
 
     console.log(
@@ -664,8 +650,6 @@ const server = http.createServer((req, res) => {
     return sendText(res, 200, 'OK');
   }
 
-  // Cron-job.org gọi endpoint này.
-  // Response trả ngay, scan chạy phía sau.
   if (pathname === '/scan') {
     const alreadyRunning = Boolean(scanPromise);
 
@@ -708,8 +692,6 @@ server.listen(PORT, '0.0.0.0', () => {
 // ---------- STARTUP ----------
 
 (async () => {
-  // Render chỉ khởi động server và kiểm tra Telegram.
-  // Scan định kỳ DUY NHẤT do Cron-job.org gọi /scan.
   await verifyTelegramConfig();
 })();
 
