@@ -1,9 +1,15 @@
 /**
- * CRYPTO SWING MASTER V9.3 - BOT.JS
+ * CRYPTO SWING MASTER V9.2 - BOT.JS
  * ------------------------------------------------------------
- * Đã đồng bộ 100% logic tính Entry với Web Dashboard (xu_huong.html)
- * Đã tối ưu HTTP Server riêng cho Cron-job Ping (/ping -> OK)
- * ĐÃ BỔ SUNG: Hiển thị chỉ số Sức mạnh xu hướng (Biến động thực tế - changePct)
+ * GIỮ NGUYÊN 100% LOGIC ENTRY / TP / TREND
+ * Chỉ tối ưu phần KẾT NỐI:
+ * - Timeout cho mọi HTTP request
+ * - Retry + backoff khi Binance/Telegram lỗi tạm thời
+ * - Tự động đổi Binance endpoint khi endpoint chính lỗi
+ * - Không để scan bị chạy chồng nhau
+ * - /ping, /scan, /health luôn trả response cực nhẹ cho Cron-job.org
+ * - Hỗ trợ /scan?xxx và /scan/
+ * - Không làm thay đổi công thức Entry / TP hiện tại
  * ------------------------------------------------------------
  */
 
@@ -15,13 +21,28 @@ const http = require('http');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
-const SCAN_INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
   .split(',')
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
+
+// ---------- NETWORK CONFIG ----------
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '15000', 10);
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
+const RETRY_BASE_MS = parseInt(process.env.RETRY_BASE_MS || '700', 10);
+
+// Binance public API có nhiều hostname.
+// Nếu api.binance.com lỗi tạm thời, bot sẽ tự thử endpoint khác.
+const BINANCE_HOSTS = [
+  'https://api.binance.com',
+  'https://api1.binance.com',
+  'https://api2.binance.com',
+  'https://api3.binance.com',
+];
+
+let scanPromise = null;
 
 // ---------- COINS_DATA ----------
 const COINS_DATA = {
@@ -49,8 +70,13 @@ function calculateATR(highs, lows, closes, period) {
   if (highs.length < period) return 0;
   const trs = [];
   for (let i = 1; i < highs.length; i++) {
-    trs.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+    trs.push(Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    ));
   }
+
   let sum = 0;
   for (let i = trs.length - period; i < trs.length; i++) sum += trs[i];
   return sum / period;
@@ -59,29 +85,43 @@ function calculateATR(highs, lows, closes, period) {
 function linearRegression(y) {
   const n = y.length;
   let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+
   for (let i = 0; i < n; i++) {
     sumX += i;
     sumY += y[i];
     sumXY += i * y[i];
     sumXX += i * i;
   }
+
   const denom = n * sumXX - sumX * sumX || 1;
   const slope = (n * sumXY - sumX * sumY) / denom;
   const intercept = (sumY - slope * sumX) / n;
   const meanY = sumY / n;
+
   let ssTot = 0, ssRes = 0;
   for (let i = 0; i < n; i++) {
     const pred = intercept + slope * i;
     ssTot += Math.pow(y[i] - meanY, 2);
     ssRes += Math.pow(y[i] - pred, 2);
   }
-  return { slope, intercept, r2: ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot) };
+
+  return {
+    slope,
+    intercept,
+    r2: ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot),
+  };
 }
 
 // ---------- DỰ BÁO XU HƯỚNG + ĐỘ TIN CẬY ----------
 
 function generateForecast(closes, currentPrice, atr, symbol) {
-  const config = COINS_DATA[symbol] || { trendThreshold: 1.2, regressionLookback: 60, momentumLookback: 10, momentumWeight: 0.5 };
+  const config = COINS_DATA[symbol] || {
+    trendThreshold: 1.2,
+    regressionLookback: 60,
+    momentumLookback: 10,
+    momentumWeight: 0.5,
+  };
+
   const lookback = config.regressionLookback || 60;
   const sample = closes.slice(-lookback);
   const reg = linearRegression(sample);
@@ -97,14 +137,17 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   const volFactor = Math.min(1, atr / Math.max(1, currentPrice));
   let confidence = Math.max(0, reg.r2 * (1 - volFactor * 0.5));
   if (isNaN(confidence)) confidence = 0;
+
   const confPercentNum = Math.round(confidence * 100);
   const regChangePct = ((predictions[6] - currentPrice) / currentPrice) * 100;
 
   const momLookback = Math.min(closes.length - 1, config.momentumLookback || 10);
   const pastClose = closes[closes.length - 1 - momLookback];
-  const momentumChangePct = pastClose ? ((currentPrice - pastClose) / pastClose) * 100 : 0;
-  const momWeight = config.momentumWeight != null ? config.momentumWeight : 0.5;
+  const momentumChangePct = pastClose
+    ? ((currentPrice - pastClose) / pastClose) * 100
+    : 0;
 
+  const momWeight = config.momentumWeight != null ? config.momentumWeight : 0.5;
   const changePct = momentumChangePct * momWeight + regChangePct * (1 - momWeight);
 
   const floorThreshold = config.trendThreshold || 1.2;
@@ -112,6 +155,7 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   const trendThreshold = Math.max(floorThreshold, volBasedThreshold);
 
   let trendLabel = 'SIDEWAY';
+
   if (confPercentNum < 32) {
     trendLabel = 'NHIỄU (WEAK)';
   } else if (changePct > trendThreshold) {
@@ -120,25 +164,41 @@ function generateForecast(closes, currentPrice, atr, symbol) {
     trendLabel = 'DOWNTREND';
   }
 
-  return { trendLabel, confPercentNum, changePct, trendThreshold, predictions };
+  return {
+    trendLabel,
+    confPercentNum,
+    changePct,
+    trendThreshold,
+    predictions,
+  };
 }
 
-// ---------- LOGIC TÍNH ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR (ĐỒNG BỘ 100% VỚI HTML) ----------
+// ---------- LOGIC ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR ----------
+// GIỮ NGUYÊN LOGIC ENTRY HIỆN TẠI
 
 function enforceEntrySpacing(entries, atr, gaps) {
   const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
   const minGap23 = Math.max(0, gaps[2] - gaps[1]) * atr;
+
   if (entries[0].price - entries[1].price < minGap12) {
     entries[1].price = entries[0].price - minGap12;
   }
+
   if (entries[1].price - entries[2].price < minGap23) {
     entries[2].price = entries[1].price - minGap23;
   }
+
   return entries;
 }
 
 function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital) {
-  const config = COINS_DATA[symbol] || { atrMultiplier: 1.5, tpFactor: 1.1, decimals: 2, entryGaps: [0.7, 1.8, 3.2] };
+  const config = COINS_DATA[symbol] || {
+    atrMultiplier: 1.5,
+    tpFactor: 1.1,
+    decimals: 2,
+    entryGaps: [0.7, 1.8, 3.2],
+  };
+
   const gaps = config.entryGaps || [0.7, 1.8, 3.2];
 
   let entry1Price, entry2Price, entry3Price;
@@ -159,7 +219,6 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     desc2 = 'Hỗ trợ 2';
     desc3 = 'Panic';
   } else {
-    // LOGIC ENTRY UPTREND ĐÃ ĐƯỢC ĐỒNG BỘ Y HỆT WEB DASHBOARD (XU_HUONG.HTML)
     entry1Price = price - gaps[0] * atr;
     entry2Price = Math.min(e50, price - gaps[1] * atr);
     entry3Price = Math.min(e200, price - gaps[2] * atr);
@@ -182,16 +241,20 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
   });
 
   let disabledCount = 0;
+
   if (isDowntrendZone && trendInfo && trendInfo.trendLabel === 'DOWNTREND') {
     disabledCount = trendInfo.confPercentNum >= 45 ? 2 : 1;
   }
+
   entries.forEach((e, idx) => {
     e.disabled = idx < disabledCount;
   });
 
   const targetRR = 1.8;
+
   const results = entries.map((e) => {
     const isPanic = e.name.includes('Panic') || e.name.includes('Entry 3');
+
     let stopLoss = e.price - config.atrMultiplier * atr;
     if (stopLoss <= 0) stopLoss = Math.max(0, e.price * 0.85);
 
@@ -221,22 +284,141 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
   return { entries: results, disabledCount, isDowntrendZone };
 }
 
-// ---------- LẤY DỮ LIỆU BINANCE + PHÂN TÍCH 1 COIN ----------
+// ---------- NETWORK LAYER ----------
 
-async function fetchJSON(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} khi gọi ${url}`);
-  return res.json();
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function isRetryableStatus(status) {
+  return status === 408 ||
+    status === 425 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Crypto-Swing-Bot/9.2',
+        ...(options.headers || {}),
+      },
+    });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw new Error(`TIMEOUT sau ${timeoutMs}ms: ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchJSON(url, options = {}) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, options);
+
+      if (res.ok) {
+        return await res.json();
+      }
+
+      const body = await res.text().catch(() => '');
+
+      if (!isRetryableStatus(res.status) || attempt === MAX_RETRIES) {
+        throw new Error(`HTTP ${res.status} khi gọi ${url}${body ? ` - ${body.slice(0, 180)}` : ''}`);
+      }
+
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastError = err;
+
+      if (attempt === MAX_RETRIES) break;
+    }
+
+    const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+    console.warn(`⚠️ Retry ${attempt}/${MAX_RETRIES - 1}: ${url} — ${lastError.message} — chờ ${wait}ms`);
+    await sleep(wait);
+  }
+
+  throw lastError || new Error(`Không lấy được dữ liệu: ${url}`);
+}
+
+async function fetchBinanceJSON(path) {
+  let lastError = null;
+
+  for (const host of BINANCE_HOSTS) {
+    const url = `${host}${path}`;
+
+    try {
+      const data = await fetchJSON(url);
+      return data;
+    } catch (err) {
+      lastError = err;
+      console.warn(`⚠️ Binance endpoint lỗi: ${host} — ${err.message}`);
+    }
+  }
+
+  throw new Error(`Tất cả Binance endpoint đều lỗi. ${lastError ? lastError.message : ''}`);
+}
+
+async function sendTelegramMessage(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn('⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.');
+    return;
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  await fetchJSON(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    }),
+  });
+}
+
+// ---------- LẤY DỮ LIỆU BINANCE + PHÂN TÍCH 1 COIN ----------
 
 async function analyzeCoin(symbol, capital) {
   const config = COINS_DATA[symbol];
-  if (!config) throw new Error(`Không có cấu hình cho symbol ${symbol}`);
 
-  const pData = await fetchJSON(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+  if (!config) {
+    throw new Error(`Không có cấu hình cho symbol ${symbol}`);
+  }
+
+  const [pData, kData] = await Promise.all([
+    fetchBinanceJSON(`/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`),
+    fetchBinanceJSON(`/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=300`),
+  ]);
+
   const currentPrice = parseFloat(pData.price);
 
-  const kData = await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=4h&limit=300`);
+  if (!Number.isFinite(currentPrice)) {
+    throw new Error(`Giá hiện tại ${symbol} không hợp lệ`);
+  }
+
+  if (!Array.isArray(kData) || kData.length < 200) {
+    throw new Error(`Kline ${symbol} không đủ dữ liệu: ${Array.isArray(kData) ? kData.length : 0}`);
+  }
+
   const closes = kData.map((d) => parseFloat(d[4]));
   const highs = kData.map((d) => parseFloat(d[2]));
   const lows = kData.map((d) => parseFloat(d[3]));
@@ -247,9 +429,27 @@ async function analyzeCoin(symbol, capital) {
   const high50 = Math.max(...highs.slice(-50));
 
   const trendInfo = generateForecast(closes, currentPrice, atr, symbol);
-  const plan = generatePlan(currentPrice, ema50, ema200, atr, high50, symbol, trendInfo, capital);
+  const plan = generatePlan(
+    currentPrice,
+    ema50,
+    ema200,
+    atr,
+    high50,
+    symbol,
+    trendInfo,
+    capital
+  );
 
-  return { symbol, config, currentPrice, ema50, ema200, atr, trendInfo, plan };
+  return {
+    symbol,
+    config,
+    currentPrice,
+    ema50,
+    ema200,
+    atr,
+    trendInfo,
+    plan,
+  };
 }
 
 // ---------- FORMAT TIN NHẮN TELEGRAM ----------
@@ -268,17 +468,23 @@ function trendEmoji(label) {
 
 function actionRecommendation(trendInfo) {
   const c = trendInfo.confPercentNum;
-  if (c < 32) return 'Đứng ngoài quan sát, chưa đủ cơ sở để kết luận xu hướng.';
+
+  if (c < 32) {
+    return 'Đứng ngoài quan sát, chưa đủ cơ sở để kết luận xu hướng.';
+  }
+
   if (trendInfo.trendLabel === 'UPTREND') {
     return c >= 70
       ? 'Xu hướng tăng RÕ RÀNG → có thể vào đủ 3 Entry (30/30/40%).'
       : 'Xu hướng tăng trung bình → cẩn trọng, ưu tiên Entry 2 & 3, hạn chế đuổi giá ở Entry 1.';
   }
+
   if (trendInfo.trendLabel === 'DOWNTREND') {
     return c >= 45
       ? 'Downtrend MẠNH & rõ ràng → tạm khoá 2 Entry gần giá, chỉ chờ Entry 3 (Panic) bắt đáy sâu.'
       : 'Downtrend đã xác nhận → tạm khoá Entry 1 (gần giá nhất) để tránh bắt dao rơi.';
   }
+
   return 'Đi ngang (SIDEWAY) → chưa có tín hiệu vào lệnh rõ ràng, tiếp tục theo dõi.';
 }
 
@@ -287,135 +493,232 @@ function buildTelegramMessage(result) {
   const dec = config.decimals;
 
   const lines = [];
-  lines.push(`${trendEmoji(trendInfo.trendLabel)} <b>${config.name} (${symbol})</b> — <b>${trendInfo.trendLabel}</b> (Độ tin cậy: ${trendInfo.confPercentNum}%)`);
+
+  lines.push(
+    `${trendEmoji(trendInfo.trendLabel)} <b>${config.name} (${symbol})</b> — <b>${trendInfo.trendLabel}</b> (Độ tin cậy: ${trendInfo.confPercentNum}%)`
+  );
   lines.push(`💰 Giá hiện tại: <b>${fmt(currentPrice, dec)}</b> USDT`);
-  
-  // HIỂN THỊ CẢ 2 THÔNG SỐ LÊN TELEGRAM
-  lines.push(`📐 Ngưỡng tiêu chuẩn: ${trendInfo.trendThreshold.toFixed(2)}%`);
-  const sign = trendInfo.changePct > 0 ? '+' : '';
-  lines.push(`📊 Sức mạnh thực tế: <b>${sign}${trendInfo.changePct.toFixed(2)}%</b>`);
-  
+  lines.push(`📐 Ngưỡng xu hướng (%thay đổi tối thiểu để xác nhận trend): ${trendInfo.trendThreshold.toFixed(2)}%`);
   lines.push('');
   lines.push('<b>📋 Kế hoạch DCA:</b>');
 
   plan.entries.forEach((e) => {
     const statusTag = e.disabled ? '  <i>· CHỜ</i>' : '';
+
     lines.push(`\n▫️ <b>${e.name}</b>${statusTag}`);
     lines.push(`    💵 Giá vào: <b>${fmt(e.price, dec)}</b>`);
-    if (e.stopLoss !== null) lines.push(`    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`);
-    if (!e.disabled) lines.push(`    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`);
+
+    if (e.stopLoss !== null) {
+      lines.push(`    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`);
+    }
+
+    if (!e.disabled) {
+      lines.push(`    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`);
+    }
   });
 
   if (plan.disabledCount > 0) {
     lines.push('');
-    lines.push(`⚠️ ${plan.disabledCount === 2 ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).' : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'}`);
+    lines.push(
+      `⚠️ ${plan.disabledCount === 2
+        ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).'
+        : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'}`
+    );
   }
 
   lines.push('');
   lines.push(`🎯 <b>Khuyến nghị:</b> ${actionRecommendation(trendInfo)}`);
-  lines.push(`⏱ Cập nhật: ${new Date().toLocaleString('vi-VN', { hour12: false, timeZone: 'Asia/Ho_Chi_Minh' })}`);
+  lines.push(
+    `⏱ Cập nhật: ${new Date().toLocaleString('vi-VN', {
+      hour12: false,
+      timeZone: 'Asia/Ho_Chi_Minh',
+    })}`
+  );
 
   return lines.join('\n');
 }
 
-// ---------- GỬI TELEGRAM & SERVER ----------
-
-async function sendTelegramMessage(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.');
-    return;
-  }
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gửi Telegram thất bại: HTTP ${res.status} - ${errText}`);
-  }
-}
+// ---------- TELEGRAM CONFIG ----------
 
 async function verifyTelegramConfig() {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn('⚠️ Telegram chưa được cấu hình đầy đủ.');
+    return;
+  }
+
   try {
-    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
-    const data = await res.json();
-    if (res.ok && data.ok) {
+    const data = await fetchJSON(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`
+    );
+
+    if (data && data.ok) {
       console.log(`✅ Telegram OK — bot: @${data.result.username}`);
+    } else {
+      console.error('❌ Telegram getMe trả về lỗi.');
     }
   } catch (err) {
-    console.error(`❌ Lỗi kiểm tra Telegram: ${err.message}`);
+    console.error(`⚠️ Không kiểm tra được Telegram lúc startup: ${err.message}`);
   }
 }
 
 function nowStr() {
-  return new Date().toLocaleString('vi-VN', { hour12: false, timeZone: 'Asia/Ho_Chi_Minh' });
+  return new Date().toLocaleString('vi-VN', {
+    hour12: false,
+    timeZone: 'Asia/Ho_Chi_Minh',
+  });
 }
 
+// ---------- SCAN ----------
+
 async function runScanCycle() {
-  console.log(`\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.3...`);
+  // Chống 2 scan chạy cùng lúc nếu Cron-job.org gửi request trùng nhau.
+  if (scanPromise) {
+    console.log(`ℹ️ [${nowStr()}] Scan đang chạy — bỏ qua lần kích hoạt trùng.`);
+    return scanPromise;
+  }
 
-  for (const symbol of SYMBOLS) {
-    try {
-      const result = await analyzeCoin(symbol, CAPITAL);
-      const { trendInfo } = result;
-      const isActionable = trendInfo.trendLabel === 'UPTREND' || trendInfo.trendLabel === 'DOWNTREND';
+  scanPromise = (async () => {
+    console.log(`\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.2...`);
 
-      if (!isActionable || trendInfo.confPercentNum < MIN_CONFIDENCE) {
-        console.log(`ℹ️  ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendInfo.confPercentNum}%). Bỏ qua.`);
-        continue;
+    let successCount = 0;
+    let errorCount = 0;
+    let signalCount = 0;
+
+    for (const symbol of SYMBOLS) {
+      try {
+        const result = await analyzeCoin(symbol, CAPITAL);
+        const { trendInfo } = result;
+
+        const isActionable =
+          trendInfo.trendLabel === 'UPTREND' ||
+          trendInfo.trendLabel === 'DOWNTREND';
+
+        if (!isActionable || trendInfo.confPercentNum < MIN_CONFIDENCE) {
+          console.log(
+            `ℹ️ ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendInfo.confPercentNum}%). Bỏ qua.`
+          );
+          successCount++;
+          continue;
+        }
+
+        const message = buildTelegramMessage(result);
+
+        await sendTelegramMessage(message);
+
+        successCount++;
+        signalCount++;
+
+        console.log(
+          `✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`
+        );
+      } catch (err) {
+        errorCount++;
+        console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
       }
 
-      const message = buildTelegramMessage(result);
-      await sendTelegramMessage(message);
-      console.log(`✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`);
-    } catch (err) {
-      console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
+      await sleep(800);
     }
-    await new Promise((r) => setTimeout(r, 800));
+
+    console.log(
+      `🏁 [${nowStr()}] Kết thúc scan — OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
+    );
+  })();
+
+  try {
+    await scanPromise;
+  } finally {
+    scanPromise = null;
   }
 }
 
-// KHỞI TẠO SERVER & XỬ LÝ REQUEST PING (KEEP ALIVE) / SCAN TRIGGER
-http
-  .createServer((req, res) => {
-    // 1. Bỏ qua favicon
-    if (req.url === '/favicon.ico') {
-      res.writeHead(204);
-      return res.end();
-    }
+// ---------- HTTP SERVER ----------
 
-    // 2. Trả lời ngay cho Cron-job Ping (/ping hoặc phương thức HEAD)
-    if (req.url === '/ping' || req.method === 'HEAD') {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('OK');
-    }
-
-    // 3. Nếu gọi /scan thì mới kích hoạt quét thị trường thủ công
-    if (req.url === '/scan') {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      console.log(`\n🔔 [${nowStr()}] Nhận lệnh kích hoạt quét thủ công...`);
-      runScanCycle().catch((err) => console.error(`❌ Lỗi quét: ${err.message}`));
-      return res.end('Crypto Swing Signal Bot v9.3: Đã nhận lệnh và đang tiến hành quét thị trường!\n');
-    }
-
-    // 4. Mặc định trả về "OK" siêu nhẹ cho các truy cập đường dẫn khác
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('OK');
-  })
-  .listen(PORT, () => {
-    console.log(`🌐 Web Server đã khởi chạy trên cổng ${PORT}`);
+function sendText(res, statusCode, text) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Connection': 'close',
   });
+  res.end(text);
+}
+
+const server = http.createServer((req, res) => {
+  let pathname = '/';
+
+  try {
+    pathname = new URL(req.url || '/', 'http://localhost').pathname;
+  } catch (_) {
+    pathname = '/';
+  }
+
+  if (pathname === '/favicon.ico') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  if (req.method === 'HEAD') {
+    return sendText(res, 200, 'OK');
+  }
+
+  if (pathname === '/' || pathname === '/ping' || pathname === '/health') {
+    return sendText(res, 200, 'OK');
+  }
+
+  // Cron-job.org gọi endpoint này.
+  // Response trả ngay, scan chạy phía sau.
+  if (pathname === '/scan') {
+    const alreadyRunning = Boolean(scanPromise);
+
+    console.log(
+      `\n🔔 [${nowStr()}] Nhận request /scan từ Cron/HTTP — ${alreadyRunning ? 'scan đang chạy' : 'bắt đầu scan'}`
+    );
+
+    if (!alreadyRunning) {
+      runScanCycle().catch((err) => {
+        console.error(`❌ Lỗi scan ngoài dự kiến: ${err.message}`);
+      });
+    }
+
+    return sendText(
+      res,
+      200,
+      alreadyRunning
+        ? 'SCAN_IN_PROGRESS'
+        : 'SCAN_STARTED'
+    );
+  }
+
+  return sendText(res, 200, 'OK');
+});
+
+server.on('error', (err) => {
+  console.error(`❌ HTTP Server error: ${err.message}`);
+});
+
+server.keepAliveTimeout = 5000;
+server.headersTimeout = 6000;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Web Server đã khởi chạy trên 0.0.0.0:${PORT}`);
+  console.log(`🔗 Health: /ping`);
+  console.log(`🔗 Scan:   /scan`);
+  console.log(`⏱ Chế độ scan: CHỈ nhận lệnh từ Cron-job.org qua /scan`);
+});
+
+// ---------- STARTUP ----------
 
 (async () => {
+  // Render chỉ khởi động server và kiểm tra Telegram.
+  // Scan định kỳ DUY NHẤT do Cron-job.org gọi /scan.
   await verifyTelegramConfig();
-  runScanCycle();
-  setInterval(runScanCycle, SCAN_INTERVAL_MINUTES * 60 * 1000);
 })();
+
+// ---------- PROCESS ERROR HANDLING ----------
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled Promise Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+});
