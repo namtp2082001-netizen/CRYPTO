@@ -1,6 +1,5 @@
 /**
- * CRYPTO SWING MASTER V9.3 - RENDER 24/7
- * FIX: /scan chạy background, không giữ HTTP request
+ * CRYPTO SWING MASTER V9.2 - BOT.JS (FIXED RATE LIMIT)
  */
 
 'use strict';
@@ -13,7 +12,6 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
-
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
   .split(',')
   .map((s) => s.trim().toUpperCase())
@@ -127,7 +125,9 @@ const COINS_DATA = {
 // ---------- HÀM TOÁN HỌC CORE ----------
 
 function calculateEMA(data, period) {
-  if (data.length < period) return data[data.length - 1];
+  if (data.length < period) {
+    return data[data.length - 1];
+  }
 
   const k = 2 / (period + 1);
   let ema = data[0];
@@ -139,14 +139,18 @@ function calculateEMA(data, period) {
   ema = ema / period;
 
   for (let i = period; i < data.length; i++) {
-    ema = data[i] * k + ema * (1 - k);
+    ema =
+      data[i] * k +
+      ema * (1 - k);
   }
 
   return ema;
 }
 
 function calculateATR(highs, lows, closes, period) {
-  if (highs.length < period) return 0;
+  if (highs.length < period) {
+    return 0;
+  }
 
   const trs = [];
 
@@ -154,15 +158,25 @@ function calculateATR(highs, lows, closes, period) {
     trs.push(
       Math.max(
         highs[i] - lows[i],
-        Math.abs(highs[i] - closes[i - 1]),
-        Math.abs(lows[i] - closes[i - 1])
+        Math.abs(
+          highs[i] -
+          closes[i - 1]
+        ),
+        Math.abs(
+          lows[i] -
+          closes[i - 1]
+        )
       )
     );
   }
 
   let sum = 0;
 
-  for (let i = trs.length - period; i < trs.length; i++) {
+  for (
+    let i = trs.length - period;
+    i < trs.length;
+    i++
+  ) {
     sum += trs[i];
   }
 
@@ -184,69 +198,124 @@ function linearRegression(y) {
     sumXX += i * i;
   }
 
-  const denom = n * sumXX - sumX * sumX || 1;
+  const denom =
+    n * sumXX -
+    sumX * sumX ||
+    1;
 
   const slope =
-    (n * sumXY - sumX * sumY) / denom;
+    (n * sumXY -
+      sumX * sumY) /
+    denom;
 
   const intercept =
-    (sumY - slope * sumX) / n;
+    (sumY -
+      slope * sumX) /
+    n;
 
-  const meanY = sumY / n;
+  const meanY =
+    sumY / n;
 
   let ssTot = 0;
   let ssRes = 0;
 
   for (let i = 0; i < n; i++) {
-    const pred = intercept + slope * i;
+    const pred =
+      intercept +
+      slope * i;
 
-    ssTot += Math.pow(y[i] - meanY, 2);
-    ssRes += Math.pow(y[i] - pred, 2);
+    ssTot += Math.pow(
+      y[i] - meanY,
+      2
+    );
+
+    ssRes += Math.pow(
+      y[i] - pred,
+      2
+    );
   }
 
   return {
     slope,
     intercept,
-    r2: ssTot === 0
-      ? 0
-      : Math.max(0, 1 - ssRes / ssTot),
+    r2:
+      ssTot === 0
+        ? 0
+        : Math.max(
+            0,
+            1 -
+              ssRes /
+                ssTot
+          ),
   };
 }
 
 // ---------- DỰ BÁO XU HƯỚNG ----------
 
-function generateForecast(closes, currentPrice, atr, symbol) {
-  const config = COINS_DATA[symbol] || {
-    trendThreshold: 1.2,
-    regressionLookback: 60,
-    momentumLookback: 10,
-    momentumWeight: 0.5,
-  };
+function generateForecast(
+  closes,
+  currentPrice,
+  atr,
+  symbol
+) {
+  const config =
+    COINS_DATA[symbol] || {
+      trendThreshold: 1.2,
+      regressionLookback: 60,
+      momentumLookback: 10,
+      momentumWeight: 0.5,
+    };
 
-  const lookback = config.regressionLookback || 60;
-  const sample = closes.slice(-lookback);
+  const lookback =
+    config.regressionLookback ||
+    60;
 
-  const reg = linearRegression(sample);
-  const n = sample.length;
+  const sample =
+    closes.slice(-lookback);
 
-  const dailyStep = 24 / 4;
+  const reg =
+    linearRegression(sample);
+
+  const n =
+    sample.length;
+
+  const dailyStep =
+    24 / 4;
+
   const predictions = [];
 
-  for (let d = 1; d <= 7; d++) {
-    const idx = n + dailyStep * d;
+  for (
+    let d = 1;
+    d <= 7;
+    d++
+  ) {
+    const idx =
+      n +
+      dailyStep * d;
 
     predictions.push(
-      reg.intercept + reg.slope * idx
+      reg.intercept +
+      reg.slope * idx
     );
   }
 
   const volFactor =
-    Math.min(1, atr / Math.max(1, currentPrice));
+    Math.min(
+      1,
+      atr /
+        Math.max(
+          1,
+          currentPrice
+        )
+    );
 
   let confidence =
     Math.max(
       0,
-      reg.r2 * (1 - volFactor * 0.5)
+      reg.r2 *
+        (1 -
+          volFactor *
+            0.5)
     );
 
   if (isNaN(confidence)) {
@@ -254,39 +323,60 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   }
 
   const confPercentNum =
-    Math.round(confidence * 100);
+    Math.round(
+      confidence * 100
+    );
 
   const regChangePct =
-    ((predictions[6] - currentPrice) /
-      currentPrice) * 100;
+    ((predictions[6] -
+      currentPrice) /
+      currentPrice) *
+    100;
 
   const momLookback =
     Math.min(
       closes.length - 1,
-      config.momentumLookback || 10
+      config.momentumLookback ||
+        10
     );
 
   const pastClose =
-    closes[closes.length - 1 - momLookback];
+    closes[
+      closes.length -
+        1 -
+        momLookback
+    ];
 
-  const momentumChangePct = pastClose
-    ? ((currentPrice - pastClose) / pastClose) * 100
-    : 0;
+  const momentumChangePct =
+    pastClose
+      ? ((currentPrice -
+          pastClose) /
+          pastClose) *
+        100
+      : 0;
 
   const momWeight =
-    config.momentumWeight != null
+    config.momentumWeight !=
+    null
       ? config.momentumWeight
       : 0.5;
 
   const changePct =
-    momentumChangePct * momWeight +
-    regChangePct * (1 - momWeight);
+    momentumChangePct *
+      momWeight +
+    regChangePct *
+      (1 - momWeight);
 
   const floorThreshold =
-    config.trendThreshold || 1.2;
+    config.trendThreshold ||
+    1.2;
 
   const volBasedThreshold =
-    (atr / Math.max(1e-9, currentPrice)) *
+    (atr /
+      Math.max(
+        1e-9,
+        currentPrice
+      )) *
     100 *
     0.6;
 
@@ -296,14 +386,26 @@ function generateForecast(closes, currentPrice, atr, symbol) {
       volBasedThreshold
     );
 
-  let trendLabel = 'SIDEWAY';
+  let trendLabel =
+    'SIDEWAY';
 
-  if (confPercentNum < 32) {
-    trendLabel = 'NHIỄU (WEAK)';
-  } else if (changePct > trendThreshold) {
-    trendLabel = 'UPTREND';
-  } else if (changePct < -trendThreshold) {
-    trendLabel = 'DOWNTREND';
+  if (
+    confPercentNum < 32
+  ) {
+    trendLabel =
+      'NHIỄU (WEAK)';
+  } else if (
+    changePct >
+    trendThreshold
+  ) {
+    trendLabel =
+      'UPTREND';
+  } else if (
+    changePct <
+    -trendThreshold
+  ) {
+    trendLabel =
+      'DOWNTREND';
   }
 
   return {
@@ -317,29 +419,43 @@ function generateForecast(closes, currentPrice, atr, symbol) {
 
 // ---------- ENTRY ----------
 
-function enforceEntrySpacing(entries, atr, gaps) {
+function enforceEntrySpacing(
+  entries,
+  atr,
+  gaps
+) {
   const minGap12 =
-    Math.max(0, gaps[1] - gaps[0]) * atr;
+    Math.max(
+      0,
+      gaps[1] -
+        gaps[0]
+    ) * atr;
 
   const minGap23 =
-    Math.max(0, gaps[2] - gaps[1]) * atr;
+    Math.max(
+      0,
+      gaps[2] -
+        gaps[1]
+    ) * atr;
 
   if (
     entries[0].price -
-    entries[1].price <
+      entries[1].price <
     minGap12
   ) {
     entries[1].price =
-      entries[0].price - minGap12;
+      entries[0].price -
+      minGap12;
   }
 
   if (
     entries[1].price -
-    entries[2].price <
+      entries[2].price <
     minGap23
   ) {
     entries[2].price =
-      entries[1].price - minGap23;
+      entries[1].price -
+      minGap23;
   }
 
   return entries;
@@ -355,15 +471,21 @@ function generatePlan(
   trendInfo,
   capital
 ) {
-  const config = COINS_DATA[symbol] || {
-    atrMultiplier: 1.5,
-    tpFactor: 1.1,
-    decimals: 2,
-    entryGaps: [0.7, 1.8, 3.2],
-  };
+  const config =
+    COINS_DATA[symbol] || {
+      atrMultiplier: 1.5,
+      tpFactor: 1.1,
+      decimals: 2,
+      entryGaps: [
+        0.7,
+        1.8,
+        3.2,
+      ],
+    };
 
   const gaps =
-    config.entryGaps || [0.7, 1.8, 3.2];
+    config.entryGaps ||
+    [0.7, 1.8, 3.2];
 
   let entry1Price;
   let entry2Price;
@@ -374,72 +496,105 @@ function generatePlan(
   let desc3;
 
   const isDowntrendZone =
-    price < e50 || price < e200;
+    price < e50 ||
+    price < e200;
 
   if (isDowntrendZone) {
     entry1Price =
-      price - gaps[0] * atr;
+      price -
+      gaps[0] * atr;
 
     entry2Price =
-      price - gaps[1] * atr;
+      price -
+      gaps[1] * atr;
 
     entry3Price =
-      price - gaps[2] * atr;
+      price -
+      gaps[2] * atr;
 
-    if (entry1Price >= price) {
-      entry1Price = price * 0.98;
+    if (
+      entry1Price >=
+      price
+    ) {
+      entry1Price =
+        price * 0.98;
     }
 
-    if (entry2Price >= entry1Price) {
-      entry2Price = entry1Price * 0.96;
+    if (
+      entry2Price >=
+      entry1Price
+    ) {
+      entry2Price =
+        entry1Price * 0.96;
     }
 
-    if (entry3Price >= entry2Price) {
-      entry3Price = entry2Price * 0.94;
+    if (
+      entry3Price >=
+      entry2Price
+    ) {
+      entry3Price =
+        entry2Price * 0.94;
     }
 
-    desc1 = 'Hỗ trợ 1';
-    desc2 = 'Hỗ trợ 2';
-    desc3 = 'Panic';
+    desc1 =
+      'Hỗ trợ 1';
+
+    desc2 =
+      'Hỗ trợ 2';
+
+    desc3 =
+      'Panic';
 
   } else {
     entry1Price =
-      price - gaps[0] * atr;
+      price -
+      gaps[0] * atr;
 
     entry2Price =
       Math.min(
         e50,
-        price - gaps[1] * atr
+        price -
+          gaps[1] * atr
       );
 
     entry3Price =
       Math.min(
         e200,
-        price - gaps[2] * atr
+        price -
+          gaps[2] * atr
       );
 
-    desc1 = 'Pullback nhanh';
-    desc2 = 'EMA50 / Pullback sâu';
-    desc3 = 'EMA200 / Panic';
+    desc1 =
+      'Pullback nhanh';
+
+    desc2 =
+      'EMA50 / Pullback sâu';
+
+    desc3 =
+      'EMA200 / Panic';
   }
 
   let entries = [
     {
       desc: desc1,
       price: entry1Price,
-      weight: 0.3
+      weight: 0.3,
     },
     {
       desc: desc2,
       price: entry2Price,
-      weight: 0.3
+      weight: 0.3,
     },
     {
       desc: desc3,
       price: entry3Price,
-      weight: 0.4
+      weight: 0.4,
     },
-  ].sort((a, b) => b.price - a.price);
+  ].sort(
+    (a, b) =>
+      b.price -
+      a.price
+  );
 
   entries =
     enforceEntrySpacing(
@@ -448,109 +603,167 @@ function generatePlan(
       gaps
     );
 
-  entries.forEach((e, idx) => {
-    e.name =
-      `Entry ${idx + 1} (${e.desc})`;
-  });
+  entries.forEach(
+    (e, idx) => {
+      e.name =
+        `Entry ${idx + 1} (${e.desc})`;
+    }
+  );
 
   let disabledCount = 0;
 
   if (
     isDowntrendZone &&
     trendInfo &&
-    trendInfo.trendLabel === 'DOWNTREND'
+    trendInfo.trendLabel ===
+      'DOWNTREND'
   ) {
     disabledCount =
-      trendInfo.confPercentNum >= 45
+      trendInfo.confPercentNum >=
+      45
         ? 2
         : 1;
   }
 
-  entries.forEach((e, idx) => {
-    e.disabled =
-      idx < disabledCount;
-  });
-
-  const targetRR = 1.8;
-
-  const results = entries.map((e) => {
-    const isPanic =
-      e.name.includes('Panic') ||
-      e.name.includes('Entry 3');
-
-    let stopLoss =
-      e.price -
-      config.atrMultiplier * atr;
-
-    if (stopLoss <= 0) {
-      stopLoss =
-        Math.max(
-          0,
-          e.price * 0.85
-        );
+  entries.forEach(
+    (e, idx) => {
+      e.disabled =
+        idx <
+        disabledCount;
     }
+  );
 
-    const tpFromRR =
-      e.price +
-      (e.price - stopLoss) *
-      targetRR;
+  const targetRR =
+    1.8;
 
-    let finalTP;
-
-    if (isDowntrendZone) {
-      finalTP =
-        Math.max(
-          tpFromRR,
-          price * 1.03
+  const results =
+    entries.map((e) => {
+      const isPanic =
+        e.name.includes(
+          'Panic'
+        ) ||
+        e.name.includes(
+          'Entry 3'
         );
-    } else {
-      finalTP =
-        Math.max(
-          tpFromRR,
-          high50 * 0.99
-        );
-    }
 
-    const maxAllowedTP =
-      e.price * config.tpFactor;
+      let stopLoss =
+        e.price -
+        config.atrMultiplier *
+          atr;
 
-    if (finalTP > maxAllowedTP) {
-      finalTP = maxAllowedTP;
-    }
+      if (
+        stopLoss <= 0
+      ) {
+        stopLoss =
+          Math.max(
+            0,
+            e.price * 0.85
+          );
+      }
 
-    return {
-      name: e.name,
-      price: e.price,
-      weight: e.weight,
-      capital: capital * e.weight,
-      stopLoss:
-        isPanic ? stopLoss : null,
-      takeProfit: finalTP,
-      disabled: e.disabled,
-    };
-  });
+      const tpFromRR =
+        e.price +
+        (e.price -
+          stopLoss) *
+          targetRR;
+
+      let finalTP;
+
+      if (
+        isDowntrendZone
+      ) {
+        finalTP =
+          Math.max(
+            tpFromRR,
+            price * 1.03
+          );
+      } else {
+        finalTP =
+          Math.max(
+            tpFromRR,
+            high50 * 0.99
+          );
+      }
+
+      const maxAllowedTP =
+        e.price *
+        config.tpFactor;
+
+      if (
+        finalTP >
+        maxAllowedTP
+      ) {
+        finalTP =
+          maxAllowedTP;
+      }
+
+      return {
+        name: e.name,
+        price: e.price,
+        weight: e.weight,
+        capital:
+          capital *
+          e.weight,
+        stopLoss:
+          isPanic
+            ? stopLoss
+            : null,
+        takeProfit:
+          finalTP,
+        disabled:
+          e.disabled,
+      };
+    });
 
   return {
     entries: results,
     disabledCount,
-    isDowntrendZone
+    isDowntrendZone,
   };
 }
 
 // ---------- NETWORK ----------
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+  return new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
 
-function isRetryableStatus(status) {
+class BinanceRateLimitError extends Error {
+  constructor(
+    status,
+    message,
+    retryAfterMs = 0
+  ) {
+    super(message);
+
+    this.name =
+      'BinanceRateLimitError';
+
+    this.status =
+      status;
+
+    this.retryAfterMs =
+      retryAfterMs;
+  }
+}
+
+let binanceBlockedUntil = 0;
+
+function isRetryableStatus(
+  status
+) {
+  // KHÔNG retry 418/429.
+  // Binance 418/429 là rate-limit/IP-ban.
+  // Đổi endpoint vẫn dùng cùng public IP của Render.
   return (
     status === 408 ||
-    status === 418 ||
     status === 425 ||
-    status === 429 ||
     status === 500 ||
     status === 502 ||
     status === 503 ||
@@ -561,32 +774,40 @@ function isRetryableStatus(status) {
 async function fetchWithTimeout(
   url,
   options = {},
-  timeoutMs = REQUEST_TIMEOUT_MS
+  timeoutMs =
+    REQUEST_TIMEOUT_MS
 ) {
   const controller =
     new AbortController();
 
   const timer =
     setTimeout(
-      () => controller.abort(),
+      () =>
+        controller.abort(),
       timeoutMs
     );
 
   try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'User-Agent':
-          'Crypto-Swing-Bot/9.3',
-        ...(options.headers || {}),
-      },
-    });
+    return await fetch(
+      url,
+      {
+        ...options,
+        signal:
+          controller.signal,
+        headers: {
+          'User-Agent':
+            'Crypto-Swing-Bot/9.4',
+          ...(options.headers ||
+            {}),
+        },
+      }
+    );
 
   } catch (err) {
     if (
       err &&
-      err.name === 'AbortError'
+      err.name ===
+        'AbortError'
     ) {
       throw new Error(
         `TIMEOUT sau ${timeoutMs}ms: ${url}`
@@ -604,11 +825,13 @@ async function fetchJSON(
   url,
   options = {}
 ) {
-  let lastError = null;
+  let lastError =
+    null;
 
   for (
     let attempt = 1;
-    attempt <= MAX_RETRIES;
+    attempt <=
+      MAX_RETRIES;
     attempt++
   ) {
     try {
@@ -623,17 +846,90 @@ async function fetchJSON(
       }
 
       const body =
-        await res.text()
-          .catch(() => '');
+        await res
+          .text()
+          .catch(
+            () => ''
+          );
+
+      // Binance 418/429:
+      // DỪNG NGAY.
+      if (
+        res.status ===
+          418 ||
+        res.status ===
+          429
+      ) {
+        const retryAfterHeader =
+          Number(
+            res.headers.get(
+              'retry-after'
+            ) || 0
+          );
+
+        let retryAfterMs =
+          retryAfterHeader >
+          0
+            ? retryAfterHeader *
+              1000
+            : 0;
+
+        // Binance thường trả:
+        // "banned until <unix_ms>"
+        const bannedUntilMatch =
+          body.match(
+            /banned until (\d+)/i
+          );
+
+        if (
+          bannedUntilMatch
+        ) {
+          const bannedUntil =
+            Number(
+              bannedUntilMatch[1]
+            );
+
+          if (
+            Number.isFinite(
+              bannedUntil
+            ) &&
+            bannedUntil >
+              Date.now()
+          ) {
+            retryAfterMs =
+              bannedUntil -
+              Date.now();
+          }
+        }
+
+        throw new BinanceRateLimitError(
+          res.status,
+          `BINANCE RATE LIMIT ${res.status}: ${
+            body
+              ? body.slice(
+                  0,
+                  300
+                )
+              : 'Binance đang giới hạn request/IP.'
+          }`,
+          retryAfterMs
+        );
+      }
 
       if (
-        !isRetryableStatus(res.status) ||
-        attempt === MAX_RETRIES
+        !isRetryableStatus(
+          res.status
+        ) ||
+        attempt ===
+          MAX_RETRIES
       ) {
         throw new Error(
           `HTTP ${res.status} khi gọi ${url}${
             body
-              ? ` - ${body.slice(0, 180)}`
+              ? ` - ${body.slice(
+                  0,
+                  180
+                )}`
               : ''
           }`
         );
@@ -645,10 +941,21 @@ async function fetchJSON(
         );
 
     } catch (err) {
-      lastError = err;
+      // Rate-limit/IP-ban:
+      // ném thẳng ra ngoài.
+      if (
+        err instanceof
+        BinanceRateLimitError
+      ) {
+        throw err;
+      }
+
+      lastError =
+        err;
 
       if (
-        attempt === MAX_RETRIES
+        attempt ===
+        MAX_RETRIES
       ) {
         break;
       }
@@ -656,9 +963,13 @@ async function fetchJSON(
 
     const wait =
       RETRY_BASE_MS *
-      Math.pow(2, attempt - 1) +
+        Math.pow(
+          2,
+          attempt - 1
+        ) +
       Math.floor(
-        Math.random() * 500
+        Math.random() *
+          500
       );
 
     console.warn(
@@ -667,7 +978,9 @@ async function fetchJSON(
       } — chờ ${wait}ms`
     );
 
-    await sleep(wait);
+    await sleep(
+      wait
+    );
   }
 
   throw (
@@ -678,8 +991,32 @@ async function fetchJSON(
   );
 }
 
-async function fetchBinanceJSON(path) {
-  let lastError = null;
+async function fetchBinanceJSON(
+  path
+) {
+  // Nếu IP đã bị Binance block
+  // trong cùng process thì không gửi thêm request.
+  if (
+    binanceBlockedUntil >
+    Date.now()
+  ) {
+    const remain =
+      Math.ceil(
+        (binanceBlockedUntil -
+          Date.now()) /
+          1000
+      );
+
+    throw new BinanceRateLimitError(
+      418,
+      `Binance IP đang bị block. Còn khoảng ${remain}s.`,
+      binanceBlockedUntil -
+        Date.now()
+    );
+  }
+
+  let lastError =
+    null;
 
   for (
     const host of BINANCE_HOSTS
@@ -689,12 +1026,37 @@ async function fetchBinanceJSON(path) {
 
     try {
       const data =
-        await fetchJSON(url);
+        await fetchJSON(
+          url
+        );
 
       return data;
 
     } catch (err) {
-      lastError = err;
+      lastError =
+        err;
+
+      // 418/429:
+      // KHÔNG đổi host.
+      if (
+        err instanceof
+        BinanceRateLimitError
+      ) {
+        if (
+          err.retryAfterMs >
+          0
+        ) {
+          binanceBlockedUntil =
+            Date.now() +
+            err.retryAfterMs;
+        }
+
+        console.error(
+          `🛑 Binance rate-limit/IP-ban ${err.status}: DỪNG toàn bộ request Binance trong scan này.`
+        );
+
+        throw err;
+      }
 
       console.warn(
         `⚠️ Binance endpoint lỗi: ${host} — ${err.message}`
@@ -713,7 +1075,9 @@ async function fetchBinanceJSON(path) {
 
 // ---------- TELEGRAM ----------
 
-async function sendTelegramMessage(text) {
+async function sendTelegramMessage(
+  text
+) {
   if (
     !TELEGRAM_BOT_TOKEN ||
     !TELEGRAM_CHAT_ID
@@ -721,6 +1085,7 @@ async function sendTelegramMessage(text) {
     console.warn(
       '⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.'
     );
+
     return;
   }
 
@@ -730,19 +1095,27 @@ async function sendTelegramMessage(text) {
   await fetchJSON(
     url,
     {
-      method: 'POST',
+      method:
+        'POST',
+
       headers: {
         'Content-Type':
           'application/json',
       },
-      body: JSON.stringify({
-        chat_id:
-          TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview:
-          true,
-      }),
+
+      body:
+        JSON.stringify({
+          chat_id:
+            TELEGRAM_CHAT_ID,
+
+          text,
+
+          parse_mode:
+            'HTML',
+
+          disable_web_page_preview:
+            true,
+        }),
     }
   );
 }
@@ -762,15 +1135,19 @@ async function analyzeCoin(
     );
   }
 
+  // Chỉ gọi kline để giảm request.
+  // 210 cây 4h đủ cho EMA200 + dữ liệu đệm.
   const kData =
     await fetchBinanceJSON(
       `/api/v3/klines?symbol=${encodeURIComponent(
         symbol
-      )}&interval=4h&limit=300`
+      )}&interval=4h&limit=210`
     );
 
   if (
-    !Array.isArray(kData) ||
+    !Array.isArray(
+      kData
+    ) ||
     kData.length < 200
   ) {
     throw new Error(
@@ -784,21 +1161,26 @@ async function analyzeCoin(
 
   const closes =
     kData.map(
-      d => parseFloat(d[4])
+      (d) =>
+        parseFloat(d[4])
     );
 
   const highs =
     kData.map(
-      d => parseFloat(d[2])
+      (d) =>
+        parseFloat(d[2])
     );
 
   const lows =
     kData.map(
-      d => parseFloat(d[3])
+      (d) =>
+        parseFloat(d[3])
     );
 
   const currentPrice =
-    closes[closes.length - 1];
+    closes[
+      closes.length - 1
+    ];
 
   if (
     !Number.isFinite(
@@ -832,7 +1214,9 @@ async function analyzeCoin(
 
   const high50 =
     Math.max(
-      ...highs.slice(-50)
+      ...highs.slice(
+        -50
+      )
     );
 
   const trendInfo =
@@ -885,21 +1269,26 @@ function fmt(
     .toFixed(decimals);
 }
 
-function trendEmoji(label) {
+function trendEmoji(
+  label
+) {
   if (
-    label === 'UPTREND'
+    label ===
+    'UPTREND'
   ) {
     return '🟢';
   }
 
   if (
-    label === 'DOWNTREND'
+    label ===
+    'DOWNTREND'
   ) {
     return '🔴';
   }
 
   if (
-    label === 'NHIỄU (WEAK)'
+    label ===
+    'NHIỄU (WEAK)'
   ) {
     return '⚪';
   }
@@ -946,7 +1335,7 @@ function buildTelegramMessage(
     config,
     currentPrice,
     trendInfo,
-    plan
+    plan,
   } = result;
 
   const dec =
@@ -984,7 +1373,7 @@ function buildTelegramMessage(
   );
 
   plan.entries.forEach(
-    e => {
+    (e) => {
       const statusTag =
         e.disabled
           ? '  <i>· CHỜ</i>'
@@ -1024,13 +1413,15 @@ function buildTelegramMessage(
   );
 
   if (
-    plan.disabledCount > 0
+    plan.disabledCount >
+    0
   ) {
     lines.push('');
 
     lines.push(
       `⚠️ ${
-        plan.disabledCount === 2
+        plan.disabledCount ===
+        2
           ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).'
           : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'
       }`
@@ -1056,10 +1447,12 @@ function buildTelegramMessage(
     )}`
   );
 
-  return lines.join('\n');
+  return lines.join(
+    '\n'
+  );
 }
 
-// ---------- TELEGRAM VERIFY ----------
+// ---------- TELEGRAM CONFIG ----------
 
 async function verifyTelegramConfig() {
   if (
@@ -1069,6 +1462,7 @@ async function verifyTelegramConfig() {
     console.warn(
       '⚠️ Telegram chưa được cấu hình đầy đủ.'
     );
+
     return;
   }
 
@@ -1098,8 +1492,6 @@ async function verifyTelegramConfig() {
   }
 }
 
-// ---------- TIME ----------
-
 function nowStr() {
   return new Date().toLocaleString(
     'vi-VN',
@@ -1125,12 +1517,13 @@ async function runScanCycle() {
   scanPromise =
     (async () => {
       console.log(
-        `\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.3...`
+        `\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.4...`
       );
 
       let successCount = 0;
       let errorCount = 0;
       let signalCount = 0;
+      let symbolsScanned = 0;
 
       const runSignals = [];
       const runErrors = [];
@@ -1138,8 +1531,6 @@ async function runScanCycle() {
       for (
         const symbol of SYMBOLS
       ) {
-        let trendInfo = null;
-
         try {
           console.log(
             `🔎 [${nowStr()}] Đang phân tích ${symbol}...`
@@ -1151,7 +1542,9 @@ async function runScanCycle() {
               CAPITAL
             );
 
-          trendInfo =
+          symbolsScanned++;
+
+          const trendInfo =
             result.trendInfo;
 
           const isActionable =
@@ -1170,6 +1563,7 @@ async function runScanCycle() {
             );
 
             successCount++;
+
             continue;
           }
 
@@ -1183,7 +1577,9 @@ async function runScanCycle() {
               message
             );
 
-          } catch (sendErr) {
+          } catch (
+            sendErr
+          ) {
             errorCount++;
 
             runErrors.push({
@@ -1191,14 +1587,16 @@ async function runScanCycle() {
               stage:
                 'send_telegram',
               message:
-                sendErr.message
+                sendErr.message,
             });
 
             console.error(
               `❌ ${symbol}: Tín hiệu đã tính xong nhưng GỬI TELEGRAM THẤT BẠI — ${sendErr.message}`
             );
 
-            await sleep(1500);
+            await sleep(
+              1500
+            );
 
             continue;
           }
@@ -1211,46 +1609,101 @@ async function runScanCycle() {
             trendLabel:
               trendInfo.trendLabel,
             confidence:
-              trendInfo.confPercentNum
+              trendInfo.confPercentNum,
           });
 
           console.log(
             `✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`
           );
 
-        } catch (err) {
+        } catch (
+          err
+        ) {
           errorCount++;
 
           runErrors.push({
             symbol,
-            stage: 'analyze',
+            stage:
+              err instanceof
+              BinanceRateLimitError
+                ? 'binance_rate_limit'
+                : 'analyze',
             message:
-              err.message
+              err.message,
           });
 
           console.error(
             `❌ ${symbol}: Lỗi khi phân tích — ${err.message}`
           );
+
+          // Binance 418/429:
+          // DỪNG TOÀN BỘ SCAN.
+          if (
+            err instanceof
+            BinanceRateLimitError
+          ) {
+            console.error(
+              `🛑 [${nowStr()}] Binance đang rate-limit/IP-ban. DỪNG scan hiện tại để tránh làm ban nặng hơn.`
+            );
+
+            const waitText =
+              err.retryAfterMs >
+              0
+                ? ` Thời gian chờ ước tính: ${Math.ceil(
+                    err.retryAfterMs /
+                      60000
+                  )} phút.`
+                : '';
+
+            try {
+              await sendTelegramMessage(
+                `🛑 <b>BINANCE RATE LIMIT / IP BAN</b>\n\n` +
+                `Bot đã tự động DỪNG scan để không gửi thêm request gây ban nặng hơn.\n` +
+                `Symbol gặp lỗi: <b>${symbol}</b>\n` +
+                `HTTP: <b>${err.status}</b>\n` +
+                `${waitText}\n` +
+                `⏱ ${nowStr()}`
+              );
+
+            } catch (
+              telegramErr
+            ) {
+              console.error(
+                `⚠️ Không gửi được cảnh báo Binance qua Telegram: ${telegramErr.message}`
+              );
+            }
+
+            break;
+          }
         }
 
-        await sleep(1500);
+        // Scan 4 giờ/lần nên ưu tiên an toàn.
+        await sleep(
+          2000
+        );
       }
 
       lastRunInfo = {
-        time: nowStr(),
-        symbolsScanned:
-          SYMBOLS.length,
+        time:
+          nowStr(),
+
+        symbolsScanned,
+
         successCount,
+
         errorCount,
+
         signalCount,
+
         signals:
           runSignals,
+
         errors:
           runErrors,
       };
 
       console.log(
-        `🏁 [${nowStr()}] Kết thúc scan — OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
+        `🏁 [${nowStr()}] Kết thúc scan — Đã xử lý: ${symbolsScanned}/${SYMBOLS.length}, OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
       );
     })();
 
@@ -1258,7 +1711,8 @@ async function runScanCycle() {
     await scanPromise;
 
   } finally {
-    scanPromise = null;
+    scanPromise =
+      null;
   }
 }
 
@@ -1314,7 +1768,8 @@ const server =
       }
 
       if (
-        req.method === 'HEAD'
+        req.method ===
+        'HEAD'
       ) {
         return sendText(
           res,
@@ -1370,44 +1825,6 @@ const server =
 
               lastRun:
                 lastRunInfo,
-
-              serverTime:
-                nowStr(),
-            },
-            null,
-            2
-          )
-        );
-      }
-
-      // ---------- SCAN STATUS ----------
-      if (
-        pathname ===
-        '/scan-status'
-      ) {
-        const running =
-          Boolean(
-            scanPromise
-          );
-
-        return sendText(
-          res,
-          200,
-          JSON.stringify(
-            {
-              status:
-                running
-                  ? 'RUNNING'
-                  : 'IDLE',
-
-              scanRunningNow:
-                running,
-
-              lastRun:
-                lastRunInfo,
-
-              time:
-                nowStr(),
             },
             null,
             2
@@ -1438,27 +1855,62 @@ const server =
         sendTelegramMessage(
           `🧪 Test message — bot còn sống lúc ${nowStr()}`
         )
-          .then(() =>
-            sendText(
-              res,
-              200,
-              'TELEGRAM_TEST_OK: đã gửi tin nhắn thành công, kiểm tra Telegram của bạn.'
-            )
+          .then(
+            () =>
+              sendText(
+                res,
+                200,
+                'TELEGRAM_TEST_OK: đã gửi tin nhắn thành công, kiểm tra Telegram của bạn.'
+              )
           )
-          .catch(err =>
-            sendText(
-              res,
-              200,
-              `TELEGRAM_TEST_FAILED: ${err.message}`
-            )
+          .catch(
+            (err) =>
+              sendText(
+                res,
+                200,
+                `TELEGRAM_TEST_FAILED: ${err.message}`
+              )
           );
 
         return;
       }
 
+      // ---------- SCAN STATUS ----------
+      if (
+        pathname ===
+        '/scan-status'
+      ) {
+        const running =
+          Boolean(
+            scanPromise
+          );
+
+        return sendText(
+          res,
+          200,
+          JSON.stringify(
+            {
+              status:
+                running
+                  ? 'RUNNING'
+                  : 'IDLE',
+
+              lastRun:
+                lastRunInfo,
+
+              time:
+                nowStr(),
+            },
+            null,
+            2
+          )
+        );
+      }
+
       // ---------- SCAN ----------
       if (
-        pathname === '/scan'
+        pathname ===
+        '/scan'
       ) {
         const alreadyRunning =
           Boolean(
@@ -1473,22 +1925,26 @@ const server =
           }`
         );
 
-        // /scan chỉ nhận lệnh và trả response ngay.
-        // Scan tiếp tục chạy background.
+        // /scan chỉ nhận lệnh.
+        // Scan chạy background.
         if (
           !alreadyRunning
         ) {
           runScanCycle()
-            .then(() => {
-              console.log(
-                `✅ [${nowStr()}] /scan hoàn tất — kiểm tra Telegram và /status.`
-              );
-            })
-            .catch(err => {
-              console.error(
-                `❌ Lỗi scan ngoài dự kiến: ${err.message}`
-              );
-            });
+            .then(
+              () => {
+                console.log(
+                  `✅ [${nowStr()}] /scan hoàn tất — kiểm tra Telegram và /status.`
+                );
+              }
+            )
+            .catch(
+              (err) => {
+                console.error(
+                  `❌ Lỗi scan ngoài dự kiến: ${err.message}`
+                );
+              }
+            );
         }
 
         return sendText(
@@ -1512,7 +1968,7 @@ const server =
 
 server.on(
   'error',
-  err => {
+  (err) => {
     console.error(
       `❌ HTTP Server error: ${err.message}`
     );
@@ -1542,19 +1998,19 @@ server.listen(
     );
 
     console.log(
-      `🔗 Status: /status`
-    );
-
-    console.log(
       `🔗 Scan status: /scan-status`
     );
 
     console.log(
-      `🔗 Test: /test-telegram`
+      `🔗 Status: /status`
     );
 
     console.log(
-      `⏱ Chế độ scan: nhận lệnh từ Cron-job.org qua /scan`
+      `🔗 Test:   /test-telegram`
+    );
+
+    console.log(
+      `⏱ Chế độ scan: CHỈ nhận lệnh từ Cron-job.org qua /scan`
     );
   }
 );
@@ -1569,7 +2025,7 @@ server.listen(
 
 process.on(
   'unhandledRejection',
-  reason => {
+  (reason) => {
     console.error(
       '❌ Unhandled Promise Rejection:',
       reason
@@ -1579,7 +2035,7 @@ process.on(
 
 process.on(
   'uncaughtException',
-  err => {
+  (err) => {
     console.error(
       '❌ Uncaught Exception:',
       err
