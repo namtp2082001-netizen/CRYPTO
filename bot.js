@@ -1,8 +1,8 @@
 /**
- * CRYPTO SWING MASTER V9.2 - BOT.JS
+ * CRYPTO SWING MASTER V9.2 - BOT.JS (FLY.IO READY)
  * ------------------------------------------------------------
- * Đã đồng bộ 100% logic tính Entry với Web Dashboard (xu_huong.html)
- * Đã tối ưu HTTP Server riêng cho Cron-job Ping (/ping -> OK)
+ * Đã tối ưu HTTP Server cho Fly.io (Host 0.0.0.0 & Health Check /healthz)
+ * Giữ nguyên 100% logic phân tích & gửi tín hiệu Telegram
  * ------------------------------------------------------------
  */
 
@@ -16,7 +16,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
 const SCAN_INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
-const PORT = parseInt(process.env.PORT || '10000', 10);
+const PORT = parseInt(process.env.PORT || '8080', 10);
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
   .split(',')
   .map((s) => s.trim().toUpperCase())
@@ -122,7 +122,7 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   return { trendLabel, confPercentNum, changePct, trendThreshold, predictions };
 }
 
-// ---------- LOGIC TÍNH ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR (ĐỒNG BỘ 100% VỚI HTML) ----------
+// ---------- LOGIC TÍNH ENTRY DẢI DỰ PHÒNG & GIÃN CÁCH ATR ----------
 
 function enforceEntrySpacing(entries, atr, gaps) {
   const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
@@ -158,7 +158,6 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     desc2 = 'Hỗ trợ 2';
     desc3 = 'Panic';
   } else {
-    // LOGIC ENTRY UPTREND ĐÃ ĐƯỢC ĐỒNG BỘ Y HỆT WEB DASHBOARD (XU_HUONG.HTML)
     entry1Price = price - gaps[0] * atr;
     entry2Price = Math.min(e50, price - gaps[1] * atr);
     entry3Price = Math.min(e200, price - gaps[2] * atr);
@@ -377,37 +376,38 @@ async function runScanCycle() {
   }
 }
 
-// KHỞI TẠO SERVER & XỬ LÝ REQUEST PING (KEEP ALIVE) / SCAN TRIGGER
+// ---------- KHỞI TẠO HTTP SERVER DÀNH CHO FLY.IO HEALTHCHECK & TRIGGER ----------
 http
   .createServer((req, res) => {
-    // 1. Bỏ qua favicon
+    // 1. Bỏ qua favicon request
     if (req.url === '/favicon.ico') {
       res.writeHead(204);
       return res.end();
     }
 
-    // 2. Trả lời ngay cho Cron-job Ping (/ping hoặc phương thức HEAD)
-    if (req.url === '/ping' || req.method === 'HEAD') {
+    // 2. Fly.io Health Check endpoint (/healthz hoặc /ping)
+    if (req.url === '/healthz' || req.url === '/ping' || req.method === 'HEAD') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('OK');
     }
 
-    // 3. Nếu gọi /scan thì mới kích hoạt quét thị trường thủ công
+    // 3. Trigger quét thủ công qua URL /scan
     if (req.url === '/scan') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       console.log(`\n🔔 [${nowStr()}] Nhận lệnh kích hoạt quét thủ công...`);
       runScanCycle().catch((err) => console.error(`❌ Lỗi quét: ${err.message}`));
-      return res.end('Crypto Swing Signal Bot v9.2: Đã nhận lệnh và đang tiến hành quét thị trường!\n');
+      return res.end('Crypto Swing Signal Bot v9.2: Đã nhận lệnh quét thủ công!\n');
     }
 
-    // 4. Mặc định trả về "OK" siêu nhẹ cho các truy cập đường dẫn khác
+    // 4. Mặc định trả về "OK" cho root URL '/' để Fly.io kiểm tra trạng thái
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('OK');
+    res.end('Crypto Swing Bot V9.2 is running on Fly.io!');
   })
-  .listen(PORT, () => {
-    console.log(`🌐 Web Server đã khởi chạy trên cổng ${PORT}`);
+  .listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 HTTP Server đang chạy trên 0.0.0.0:${PORT} (Sẵn sàng kết nối Fly.io)`);
   });
 
+// ---------- CHẠY BOT VÒNG LẶP LIÊN TỤC 24/7 ----------
 (async () => {
   await verifyTelegramConfig();
   runScanCycle();
