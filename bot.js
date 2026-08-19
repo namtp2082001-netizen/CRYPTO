@@ -1,8 +1,4 @@
-from pathlib import Path
-
-out = Path("/mnt/data/bot_render_fixed.js")
-
-code = r'''/**
+/**
  * CRYPTO SWING MASTER V9.2 - BOT.JS
  * ------------------------------------------------------------
  * GIỮ NGUYÊN 100% LOGIC ENTRY / TP / TREND
@@ -25,7 +21,6 @@ const http = require('http');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
-const SCAN_INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
@@ -290,7 +285,6 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
 }
 
 // ---------- NETWORK LAYER ----------
-// Chỉ phần này được thay đổi để tăng độ ổn định khi chạy trên Render.
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -410,7 +404,6 @@ async function analyzeCoin(symbol, capital) {
     throw new Error(`Không có cấu hình cho symbol ${symbol}`);
   }
 
-  // Hai request độc lập -> chạy song song để giảm thời gian chờ.
   const [pData, kData] = await Promise.all([
     fetchBinanceJSON(`/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`),
     fetchBinanceJSON(`/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=300`),
@@ -564,7 +557,6 @@ async function verifyTelegramConfig() {
       console.error('❌ Telegram getMe trả về lỗi.');
     }
   } catch (err) {
-    // Không được làm chết server chỉ vì Telegram tạm thời lỗi lúc startup.
     console.error(`⚠️ Không kiểm tra được Telegram lúc startup: ${err.message}`);
   }
 }
@@ -579,7 +571,7 @@ function nowStr() {
 // ---------- SCAN ----------
 
 async function runScanCycle() {
-  // Chống 2 scan chạy cùng lúc khi Cron-job + setInterval cùng kích hoạt.
+  // Chống 2 scan chạy cùng lúc nếu Cron-job.org gửi request trùng nhau.
   if (scanPromise) {
     console.log(`ℹ️ [${nowStr()}] Scan đang chạy — bỏ qua lần kích hoạt trùng.`);
     return scanPromise;
@@ -624,7 +616,6 @@ async function runScanCycle() {
         console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
       }
 
-      // Giữ khoảng nghỉ giữa các coin để tránh burst request.
       await sleep(800);
     }
 
@@ -643,7 +634,6 @@ async function runScanCycle() {
 // ---------- HTTP SERVER ----------
 
 function sendText(res, statusCode, text) {
-  // Response cực nhỏ -> Cron-job.org không bị lỗi "output too large".
   res.writeHead(statusCode, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -661,24 +651,21 @@ const server = http.createServer((req, res) => {
     pathname = '/';
   }
 
-  // favicon
   if (pathname === '/favicon.ico') {
     res.writeHead(204);
     return res.end();
   }
 
-  // HEAD luôn trả cực nhanh.
   if (req.method === 'HEAD') {
     return sendText(res, 200, 'OK');
   }
 
-  // Health check / keep alive.
   if (pathname === '/' || pathname === '/ping' || pathname === '/health') {
     return sendText(res, 200, 'OK');
   }
 
-  // Cron-job.org nên gọi URL này.
-  // Trả response NGAY, không bắt Cron chờ Binance/Telegram.
+  // Cron-job.org gọi endpoint này.
+  // Response trả ngay, scan chạy phía sau.
   if (pathname === '/scan') {
     const alreadyRunning = Boolean(scanPromise);
 
@@ -715,26 +702,15 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Web Server đã khởi chạy trên 0.0.0.0:${PORT}`);
   console.log(`🔗 Health: /ping`);
   console.log(`🔗 Scan:   /scan`);
-  console.log(`⏱ Auto scan: mỗi ${SCAN_INTERVAL_MINUTES} phút`);
+  console.log(`⏱ Chế độ scan: CHỈ nhận lệnh từ Cron-job.org qua /scan`);
 });
 
 // ---------- STARTUP ----------
 
 (async () => {
+  // Render chỉ khởi động server và kiểm tra Telegram.
+  // Scan định kỳ DUY NHẤT do Cron-job.org gọi /scan.
   await verifyTelegramConfig();
-
-  // Scan đầu tiên khi Render khởi động.
-  runScanCycle().catch((err) => {
-    console.error(`❌ Lỗi scan startup: ${err.message}`);
-  });
-
-  // Auto scan dự phòng.
-  // Nếu dùng Cron-job.org thì vẫn giữ được, nhưng scan trùng sẽ bị khóa.
-  setInterval(() => {
-    runScanCycle().catch((err) => {
-      console.error(`❌ Lỗi auto scan: ${err.message}`);
-    });
-  }, SCAN_INTERVAL_MINUTES * 60 * 1000);
 })();
 
 // ---------- PROCESS ERROR HANDLING ----------
@@ -746,8 +722,3 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
 });
-'''
-
-out.write_text(code, encoding='utf-8')
-print(f"Đã tạo: {out}")
-print(f"Số dòng: {len(code.splitlines())}")
