@@ -18,6 +18,7 @@ const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
 const SCAN_INTERVAL_MINUTES = parseInt(process.env.SCAN_INTERVAL_MINUTES || '120', 10);
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
+
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
   .split(',')
   .map((s) => s.trim().toUpperCase())
@@ -530,53 +531,389 @@ function generatePlan(
   };
 }
 
-// ---------- LẤY DỮ LIỆU BINANCE + PHÂN TÍCH 1 COIN ----------
+// ---------- LẤY DỮ LIỆU THỊ TRƯỜNG + PHÂN TÍCH 1 COIN ----------
 
-// ======================= FIX HTTP 418 =======================
-// Chỉ sửa endpoint lấy PUBLIC MARKET DATA của Binance.
-// Không thay đổi bất kỳ logic tính toán nào bên dưới.
+// Binance đang trả HTTP 418 cho IP Render hiện tại.
+// HTTP 418 là IP BAN, không phải lỗi symbol hay lỗi công thức.
+//
+// Vì vậy bot sẽ:
+// 1. Ưu tiên Binance khi IP không bị ban.
+// 2. Nếu Binance trả 418/429 -> ghi nhận thời gian Retry-After.
+// 3. Tự động chuyển sang CoinGecko để không làm hỏng vòng scan.
+// 4. Khi hết thời gian ban, tự động thử Binance lại.
+//
+// Toàn bộ logic EMA / ATR / Forecast / Entry / Telegram phía dưới
+// được giữ nguyên. Chỉ thay lớp lấy dữ liệu thị trường.
 
-const BINANCE_MARKET_DATA_BASE = 'https://data-api.binance.vision';
+const BINANCE_BASE_URL = 'https://api.binance.com';
+const COINGECKO_BASE_URL = 'https://api.coingecko.com/api/v3';
 
-async function fetchJSON(url) {
+const COINGECKO_IDS = {
+  SOLUSDT: 'solana',
+  BTCUSDT: 'bitcoin',
+  ETHUSDT: 'ethereum',
+  BNBUSDT: 'binancecoin',
+  LINKUSDT: 'chainlink',
+  SUIUSDT: 'sui'
+};
 
-  // Nếu code cũ gọi api.binance.com thì tự động chuyển sang
-  // data-api.binance.vision.
-  //
-  // Nhờ vậy không cần thay đổi các URL trong analyzeCoin().
-  const requestUrl =
-    url.startsWith('https://api.binance.com/')
-      ? `${BINANCE_MARKET_DATA_BASE}${url.slice('https://api.binance.com'.length)}`
-      : url;
+let binanceBlockedUntil = 0;
 
-  const res =
-    await fetch(requestUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Crypto-Swing-Master-V9.3'
-      }
-    });
+async function fetchJSON(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'Crypto-Swing-Master-V9.3',
+      ...(options.headers || {})
+    }
+  });
 
   if (!res.ok) {
-
-    const retryAfter =
+    const retryAfterHeader =
       res.headers.get('retry-after');
 
-    throw new Error(
-      `HTTP ${res.status} khi gọi ${requestUrl}` +
-      (
-        retryAfter
-          ? ` (Retry-After: ${retryAfter}s)`
-          : ''
-      )
-    );
+    const retryAfterSeconds =
+      retryAfterHeader
+        ? parseInt(retryAfterHeader, 10)
+        : 0;
+
+    const err =
+      new Error(
+        `HTTP ${res.status} khi gọi ${url}`
+      );
+
+    err.status = res.status;
+
+    err.retryAfterSeconds =
+      Number.isFinite(retryAfterSeconds)
+        ? retryAfterSeconds
+        : 0;
+
+    throw err;
   }
 
   return res.json();
 }
 
-async function analyzeCoin(symbol, capital) {
-  const config = COINS_DATA[symbol];
+async function fetchBinanceMarketData(symbol) {
+  const now = Date.now();
+
+  if (now < binanceBlockedUntil) {
+    const remaining =
+      Math.ceil(
+        (binanceBlockedUntil - now) / 1000
+      );
+
+    throw Object.assign(
+      new Error(
+        `Binance đang bị giới hạn IP, còn khoảng ${remaining}s`
+      ),
+      {
+        status: 418,
+        retryAfterSeconds: remaining
+      }
+    );
+  }
+
+  try {
+
+    const priceData =
+      await fetchJSON(
+        `${BINANCE_BASE_URL}/api/v3/ticker/price?symbol=${symbol}`
+      );
+
+    const klineData =
+      await fetchJSON(
+        `${BINANCE_BASE_URL}/api/v3/klines?symbol=${symbol}&interval=4h&limit=300`
+      );
+
+    if (
+      !priceData ||
+      !priceData.price
+    ) {
+      throw new Error(
+        `Binance trả dữ liệu giá không hợp lệ cho ${symbol}`
+      );
+    }
+
+    if (
+      !Array.isArray(klineData) ||
+      klineData.length < 200
+    ) {
+      throw new Error(
+        `Binance trả không đủ dữ liệu nến cho ${symbol}`
+      );
+    }
+
+    return {
+      currentPrice:
+        parseFloat(priceData.price),
+
+      closes:
+        klineData.map(
+          (d) => parseFloat(d[4])
+        ),
+
+      highs:
+        klineData.map(
+          (d) => parseFloat(d[2])
+        ),
+
+      lows:
+        klineData.map(
+          (d) => parseFloat(d[3])
+        ),
+
+      source: 'BINANCE'
+    };
+
+  } catch (err) {
+
+    if (
+      err.status === 418 ||
+      err.status === 429
+    ) {
+
+      const waitSeconds =
+        Math.max(
+          60,
+          err.retryAfterSeconds || 300
+        );
+
+      binanceBlockedUntil =
+        Date.now() +
+        waitSeconds * 1000;
+
+      console.warn(
+        `⚠️ Binance HTTP ${err.status}: tạm ngưng gọi Binance ${waitSeconds}s và chuyển sang CoinGecko.`
+      );
+    }
+
+    throw err;
+  }
+}
+
+// ---------- GOM DỮ LIỆU COINGECKO THÀNH NẾN 4H ----------
+
+function aggregateHourlyTo4H(prices) {
+  const candles = [];
+
+  if (!Array.isArray(prices)) {
+    return candles;
+  }
+
+  const groups = new Map();
+
+  for (const item of prices) {
+
+    if (
+      !Array.isArray(item) ||
+      item.length < 2
+    ) {
+      continue;
+    }
+
+    const timestamp =
+      Number(item[0]);
+
+    const price =
+      Number(item[1]);
+
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(price)
+    ) {
+      continue;
+    }
+
+    const fourHourMs =
+      4 * 60 * 60 * 1000;
+
+    const bucket =
+      Math.floor(
+        timestamp / fourHourMs
+      ) * fourHourMs;
+
+    if (!groups.has(bucket)) {
+      groups.set(bucket, []);
+    }
+
+    groups.get(bucket).push({
+      timestamp,
+      price
+    });
+  }
+
+  const sortedBuckets =
+    Array.from(
+      groups.keys()
+    ).sort(
+      (a, b) => a - b
+    );
+
+  for (const bucket of sortedBuckets) {
+
+    const points =
+      groups.get(bucket)
+        .sort(
+          (a, b) =>
+            a.timestamp - b.timestamp
+        );
+
+    if (!points.length) {
+      continue;
+    }
+
+    candles.push({
+      timestamp: bucket,
+
+      open:
+        points[0].price,
+
+      high:
+        Math.max(
+          ...points.map(
+            (p) => p.price
+          )
+        ),
+
+      low:
+        Math.min(
+          ...points.map(
+            (p) => p.price
+          )
+        ),
+
+      close:
+        points[points.length - 1].price
+    });
+  }
+
+  return candles;
+}
+
+// ---------- LẤY MARKET DATA TỪ COINGECKO ----------
+
+async function fetchCoinGeckoMarketData(symbol) {
+  const coinId =
+    COINGECKO_IDS[symbol];
+
+  if (!coinId) {
+    throw new Error(
+      `Chưa có CoinGecko ID cho ${symbol}`
+    );
+  }
+
+  // 90 ngày hourly => đủ dữ liệu để gom thành nến 4h.
+  // Sau khi gom sẽ có khoảng 540 nến 4h,
+  // đủ cho EMA200 + lookback.
+  const url =
+    `${COINGECKO_BASE_URL}/coins/${coinId}/market_chart` +
+    `?vs_currency=usd&days=90&interval=hourly&precision=full`;
+
+  const data =
+    await fetchJSON(url);
+
+  if (
+    !data ||
+    !Array.isArray(data.prices)
+  ) {
+    throw new Error(
+      `CoinGecko trả dữ liệu không hợp lệ cho ${symbol}`
+    );
+  }
+
+  const candles =
+    aggregateHourlyTo4H(
+      data.prices
+    );
+
+  if (candles.length < 200) {
+    throw new Error(
+      `CoinGecko không trả đủ dữ liệu 4h cho ${symbol}: ${candles.length} nến`
+    );
+  }
+
+  const latest =
+    candles[candles.length - 1];
+
+  return {
+    // CoinGecko định giá theo USD;
+    // USDT gần 1:1 USD nên giữ nguyên
+    // để không thay đổi logic tính toán phía dưới.
+    currentPrice:
+      latest.close,
+
+    closes:
+      candles.map(
+        (c) => c.close
+      ),
+
+    highs:
+      candles.map(
+        (c) => c.high
+      ),
+
+    lows:
+      candles.map(
+        (c) => c.low
+      ),
+
+    source:
+      'COINGECKO'
+  };
+}
+
+// ---------- CHỌN NGUỒN DỮ LIỆU ----------
+
+async function getMarketData(symbol) {
+  const now =
+    Date.now();
+
+  // Nếu Binance đang trong thời gian ban
+  // thì không gọi lại Binance ở từng coin.
+  if (
+    now < binanceBlockedUntil
+  ) {
+    return fetchCoinGeckoMarketData(
+      symbol
+    );
+  }
+
+  try {
+
+    return await fetchBinanceMarketData(
+      symbol
+    );
+
+  } catch (err) {
+
+    // Nếu Binance lỗi thì fallback CoinGecko.
+    try {
+
+      return await fetchCoinGeckoMarketData(
+        symbol
+      );
+
+    } catch (fallbackErr) {
+
+      throw new Error(
+        `${symbol}: Binance thất bại (${err.message}); ` +
+        `CoinGecko fallback cũng thất bại (${fallbackErr.message})`
+      );
+    }
+  }
+}
+
+// ---------- PHÂN TÍCH 1 COIN ----------
+
+async function analyzeCoin(
+  symbol,
+  capital
+) {
+  const config =
+    COINS_DATA[symbol];
 
   if (!config) {
     throw new Error(
@@ -584,33 +921,32 @@ async function analyzeCoin(symbol, capital) {
     );
   }
 
-  const pData =
-    await fetchJSON(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-    );
+  const marketData =
+    await getMarketData(symbol);
 
   const currentPrice =
-    parseFloat(pData.price);
-
-  const kData =
-    await fetchJSON(
-      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=4h&limit=300`
-    );
+    marketData.currentPrice;
 
   const closes =
-    kData.map((d) => parseFloat(d[4]));
+    marketData.closes;
 
   const highs =
-    kData.map((d) => parseFloat(d[2]));
+    marketData.highs;
 
   const lows =
-    kData.map((d) => parseFloat(d[3]));
+    marketData.lows;
 
   const ema50 =
-    calculateEMA(closes, 50);
+    calculateEMA(
+      closes,
+      50
+    );
 
   const ema200 =
-    calculateEMA(closes, 200);
+    calculateEMA(
+      closes,
+      200
+    );
 
   const atr =
     calculateATR(
@@ -645,6 +981,10 @@ async function analyzeCoin(symbol, capital) {
       capital
     );
 
+  console.log(
+    `📡 ${symbol}: dữ liệu từ ${marketData.source}`
+  );
+
   return {
     symbol,
     config,
@@ -659,7 +999,10 @@ async function analyzeCoin(symbol, capital) {
 
 // ---------- FORMAT TIN NHẮN TELEGRAM ----------
 
-function fmt(num, decimals) {
+function fmt(
+  num,
+  decimals
+) {
   if (
     num === null ||
     num === undefined ||
@@ -668,26 +1011,36 @@ function fmt(num, decimals) {
     return '--';
   }
 
-  return Number(num).toFixed(decimals);
+  return Number(num)
+    .toFixed(decimals);
 }
 
 function trendEmoji(label) {
-  if (label === 'UPTREND') {
+
+  if (
+    label === 'UPTREND'
+  ) {
     return '🟢';
   }
 
-  if (label === 'DOWNTREND') {
+  if (
+    label === 'DOWNTREND'
+  ) {
     return '🔴';
   }
 
-  if (label === 'NHIỄU (WEAK)') {
+  if (
+    label === 'NHIỄU (WEAK)'
+  ) {
     return '⚪';
   }
 
   return '🟡';
 }
 
-function actionRecommendation(trendInfo) {
+function actionRecommendation(
+  trendInfo
+) {
   const c =
     trendInfo.confPercentNum;
 
@@ -695,13 +1048,19 @@ function actionRecommendation(trendInfo) {
     return 'Đứng ngoài quan sát, chưa đủ cơ sở để kết luận xu hướng.';
   }
 
-  if (trendInfo.trendLabel === 'UPTREND') {
+  if (
+    trendInfo.trendLabel ===
+    'UPTREND'
+  ) {
     return c >= 70
       ? 'Xu hướng tăng RÕ RÀNG → có thể vào đủ 3 Entry (30/30/40%).'
       : 'Xu hướng tăng trung bình → cẩn trọng, ưu tiên Entry 2 & 3, hạn chế đuổi giá ở Entry 1.';
   }
 
-  if (trendInfo.trendLabel === 'DOWNTREND') {
+  if (
+    trendInfo.trendLabel ===
+    'DOWNTREND'
+  ) {
     return c >= 45
       ? 'Downtrend MẠNH & rõ ràng → tạm khoá 2 Entry gần giá, chỉ chờ Entry 3 (Panic) bắt đáy sâu.'
       : 'Downtrend đã xác nhận → tạm khoá Entry 1 (gần giá nhất) để tránh bắt dao rơi.';
@@ -710,7 +1069,11 @@ function actionRecommendation(trendInfo) {
   return 'Đi ngang (SIDEWAY) → chưa có tín hiệu vào lệnh rõ ràng, tiếp tục theo dõi.';
 }
 
-function buildTelegramMessage(result) {
+// ---------- TẠO MESSAGE TELEGRAM ----------
+
+function buildTelegramMessage(
+  result
+) {
   const {
     symbol,
     config,
@@ -745,35 +1108,41 @@ function buildTelegramMessage(result) {
     '<b>📋 Kế hoạch DCA:</b>'
   );
 
-  plan.entries.forEach((e) => {
+  plan.entries.forEach(
+    (e) => {
 
-    const statusTag =
-      e.disabled
-        ? '  <i>· CHỜ</i>'
-        : '';
+      const statusTag =
+        e.disabled
+          ? '  <i>· CHỜ</i>'
+          : '';
 
-    lines.push(
-      `\n▫️ <b>${e.name}</b>${statusTag}`
-    );
-
-    lines.push(
-      `    💵 Giá vào: <b>${fmt(e.price, dec)}</b>`
-    );
-
-    if (e.stopLoss !== null) {
       lines.push(
-        `    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`
+        `\n▫️ <b>${e.name}</b>${statusTag}`
       );
-    }
 
-    if (!e.disabled) {
       lines.push(
-        `    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`
+        `    💵 Giá vào: <b>${fmt(e.price, dec)}</b>`
       );
-    }
-  });
 
-  if (plan.disabledCount > 0) {
+      if (
+        e.stopLoss !== null
+      ) {
+        lines.push(
+          `    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`
+        );
+      }
+
+      if (!e.disabled) {
+        lines.push(
+          `    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`
+        );
+      }
+    }
+  );
+
+  if (
+    plan.disabledCount > 0
+  ) {
 
     lines.push('');
 
@@ -805,14 +1174,17 @@ function buildTelegramMessage(result) {
   return lines.join('\n');
 }
 
-// ---------- GỬI TELEGRAM & SERVER ----------
+// ---------- GỬI TELEGRAM ----------
 
-async function sendTelegramMessage(text) {
+async function sendTelegramMessage(
+  text
+) {
 
   if (
     !TELEGRAM_BOT_TOKEN ||
     !TELEGRAM_CHAT_ID
   ) {
+
     console.warn(
       '⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.'
     );
@@ -824,20 +1196,30 @@ async function sendTelegramMessage(text) {
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
   const res =
-    await fetch(url, {
-      method: 'POST',
+    await fetch(
+      url,
+      {
+        method: 'POST',
 
-      headers: {
-        'Content-Type': 'application/json'
-      },
+        headers: {
+          'Content-Type':
+            'application/json'
+        },
 
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
+        body: JSON.stringify({
+          chat_id:
+            TELEGRAM_CHAT_ID,
+
+          text,
+
+          parse_mode:
+            'HTML',
+
+          disable_web_page_preview:
+            true,
+        }),
+      }
+    );
 
   if (!res.ok) {
 
@@ -849,6 +1231,8 @@ async function sendTelegramMessage(text) {
     );
   }
 }
+
+// ---------- KIỂM TRA TELEGRAM ----------
 
 async function verifyTelegramConfig() {
 
@@ -873,6 +1257,7 @@ async function verifyTelegramConfig() {
       res.ok &&
       data.ok
     ) {
+
       console.log(
         `✅ Telegram OK — bot: @${data.result.username}`
       );
@@ -886,15 +1271,20 @@ async function verifyTelegramConfig() {
   }
 }
 
+// ---------- GIỜ VIỆT NAM ----------
+
 function nowStr() {
   return new Date().toLocaleString(
     'vi-VN',
     {
       hour12: false,
-      timeZone: 'Asia/Ho_Chi_Minh'
+      timeZone:
+        'Asia/Ho_Chi_Minh'
     }
   );
 }
+
+// ---------- CHẠY SCAN ----------
 
 async function runScanCycle() {
 
@@ -902,7 +1292,9 @@ async function runScanCycle() {
     `\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.3...`
   );
 
-  for (const symbol of SYMBOLS) {
+  for (
+    const symbol of SYMBOLS
+  ) {
 
     try {
 
@@ -912,16 +1304,20 @@ async function runScanCycle() {
           CAPITAL
         );
 
-      const { trendInfo } =
-        result;
+      const {
+        trendInfo
+      } = result;
 
       const isActionable =
-        trendInfo.trendLabel === 'UPTREND' ||
-        trendInfo.trendLabel === 'DOWNTREND';
+        trendInfo.trendLabel ===
+          'UPTREND' ||
+        trendInfo.trendLabel ===
+          'DOWNTREND';
 
       if (
         !isActionable ||
-        trendInfo.confPercentNum < MIN_CONFIDENCE
+        trendInfo.confPercentNum <
+          MIN_CONFIDENCE
       ) {
 
         console.log(
@@ -932,7 +1328,9 @@ async function runScanCycle() {
       }
 
       const message =
-        buildTelegramMessage(result);
+        buildTelegramMessage(
+          result
+        );
 
       await sendTelegramMessage(
         message
@@ -950,87 +1348,110 @@ async function runScanCycle() {
     }
 
     await new Promise(
-      (r) => setTimeout(r, 800)
+      (r) =>
+        setTimeout(
+          r,
+          800
+        )
     );
   }
 }
 
-// KHỞI TẠO SERVER & XỬ LÝ REQUEST PING (KEEP ALIVE) / SCAN TRIGGER
+// ---------- HTTP SERVER ----------
+// /ping = keep alive
+// /scan = trigger scan thủ công
 
 http
-  .createServer((req, res) => {
+  .createServer(
+    (req, res) => {
 
-    // 1. Bỏ qua favicon
-    if (req.url === '/favicon.ico') {
-      res.writeHead(204);
-      return res.end();
-    }
+      // 1. Bỏ qua favicon
+      if (
+        req.url ===
+        '/favicon.ico'
+      ) {
 
-    // 2. Trả lời ngay cho Cron-job Ping (/ping hoặc phương thức HEAD)
-    if (
-      req.url === '/ping' ||
-      req.method === 'HEAD'
-    ) {
-
-      res.writeHead(
-        200,
-        {
-          'Content-Type':
-            'text/plain; charset=utf-8'
-        }
-      );
-
-      return res.end('OK');
-    }
-
-    // 3. Nếu gọi /scan thì mới kích hoạt quét thị trường thủ công
-    if (req.url === '/scan') {
-
-      res.writeHead(
-        200,
-        {
-          'Content-Type':
-            'text/plain; charset=utf-8'
-        }
-      );
-
-      console.log(
-        `\n🔔 [${nowStr()}] Nhận lệnh kích hoạt quét thủ công...`
-      );
-
-      runScanCycle()
-        .catch(
-          (err) =>
-            console.error(
-              `❌ Lỗi quét: ${err.message}`
-            )
+        res.writeHead(
+          204
         );
 
-      return res.end(
-        'Crypto Swing Signal Bot v9.3: Đã nhận lệnh và đang tiến hành quét thị trường!\n'
+        return res.end();
+      }
+
+      // 2. Ping keep-alive
+      if (
+        req.url === '/ping' ||
+        req.method === 'HEAD'
+      ) {
+
+        res.writeHead(
+          200,
+          {
+            'Content-Type':
+              'text/plain; charset=utf-8'
+          }
+        );
+
+        return res.end(
+          'OK'
+        );
+      }
+
+      // 3. Scan thủ công
+      if (
+        req.url === '/scan'
+      ) {
+
+        res.writeHead(
+          200,
+          {
+            'Content-Type':
+              'text/plain; charset=utf-8'
+          }
+        );
+
+        console.log(
+          `\n🔔 [${nowStr()}] Nhận lệnh kích hoạt quét thủ công...`
+        );
+
+        runScanCycle()
+          .catch(
+            (err) =>
+              console.error(
+                `❌ Lỗi quét: ${err.message}`
+              )
+          );
+
+        return res.end(
+          'Crypto Swing Signal Bot v9.3: Đã nhận lệnh và đang tiến hành quét thị trường!\n'
+        );
+      }
+
+      // 4. Các request khác trả OK
+      res.writeHead(
+        200,
+        {
+          'Content-Type':
+            'text/plain; charset=utf-8'
+        }
+      );
+
+      res.end(
+        'OK'
       );
     }
-
-    // 4. Mặc định trả về "OK" siêu nhẹ cho các truy cập đường dẫn khác
-    res.writeHead(
-      200,
-      {
-        'Content-Type':
-          'text/plain; charset=utf-8'
-      }
-    );
-
-    res.end('OK');
-
-  })
+  )
   .listen(
     PORT,
     () => {
+
       console.log(
         `🌐 Web Server đã khởi chạy trên cổng ${PORT}`
       );
     }
   );
+
+// ---------- KHỞI ĐỘNG BOT ----------
 
 (async () => {
 
@@ -1040,7 +1461,9 @@ http
 
   setInterval(
     runScanCycle,
-    SCAN_INTERVAL_MINUTES * 60 * 1000
+    SCAN_INTERVAL_MINUTES *
+      60 *
+      1000
   );
 
 })();
