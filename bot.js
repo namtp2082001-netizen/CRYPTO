@@ -251,5 +251,5 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Web Server đã khởi chạy trên port ${PORT}`);
     console.log(`🔗 Health: /ping`);
     console.log(`🔗 Scan:   /scan`);
-    console.log(`⚙️  Chế độ scan: Tự động khóa & chống kẹt 100%`);
+    console.log(`⚙️  Chế độ scan: CHỈ nhận lệnh từ Cron-job.org hoặc HTTP request`);
 });
