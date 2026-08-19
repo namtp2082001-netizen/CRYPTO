@@ -1,5 +1,6 @@
 /**
- * CRYPTO SWING MASTER V9.2 - BOT.JS (FIXED RATE LIMIT)
+ * CRYPTO SWING MASTER V9.3 - RENDER 24/7
+ * FIX: /scan chạy background, không giữ HTTP request
  */
 
 'use strict';
@@ -12,6 +13,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const CAPITAL = parseFloat(process.env.CAPITAL || '1000');
 const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || '32', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
+
 const SYMBOLS = (process.env.SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT,BNBUSDT,LINKUSDT,SUIUSDT')
   .split(',')
   .map((s) => s.trim().toUpperCase())
@@ -31,58 +33,149 @@ const BINANCE_HOSTS = [
 
 let scanPromise = null;
 
-// Lưu lại tóm tắt lần scan gần nhất để phục vụ chẩn đoán qua /status
 let lastRunInfo = {
   time: null,
   symbolsScanned: 0,
   successCount: 0,
   errorCount: 0,
   signalCount: 0,
-  signals: [],   // danh sách coin đã gửi Telegram thành công
-  errors: [],    // { symbol, message } các lỗi gặp phải (bao gồm lỗi gửi Telegram)
+  signals: [],
+  errors: [],
 };
 
 // ---------- COINS_DATA ----------
 const COINS_DATA = {
-  SOLUSDT: { name: 'SOLANA', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
-  BTCUSDT: { name: 'BITCOIN', icon: '₿', atrMultiplier: 1.2, tpFactor: 1.05, decimals: 1, entryGaps: [0.6, 1.5, 2.6], trendThreshold: 0.8, regressionLookback: 50, momentumLookback: 12, momentumWeight: 0.40 },
-  ETHUSDT: { name: 'ETHEREUM', icon: 'Ξ', atrMultiplier: 1.5, tpFactor: 1.08, decimals: 2, entryGaps: [0.7, 1.8, 3.2], trendThreshold: 1.0, regressionLookback: 42, momentumLookback: 10, momentumWeight: 0.50 },
-  BNBUSDT: { name: 'BNB CHAIN', icon: 'B', atrMultiplier: 1.5, tpFactor: 1.08, decimals: 2, entryGaps: [0.7, 1.8, 3.2], trendThreshold: 1.0, regressionLookback: 42, momentumLookback: 10, momentumWeight: 0.50 },
-  LINKUSDT: { name: 'CHAINLINK', icon: 'L', atrMultiplier: 2.2, tpFactor: 1.18, decimals: 3, entryGaps: [0.9, 2.2, 4.0], trendThreshold: 1.5, regressionLookback: 34, momentumLookback: 8, momentumWeight: 0.55 },
-  SUIUSDT: { name: 'SUI', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.12, decimals: 4, entryGaps: [0.8, 2.1, 3.8], trendThreshold: 1.6, regressionLookback: 30, momentumLookback: 6, momentumWeight: 0.60 },
+  SOLUSDT: {
+    name: 'SOLANA',
+    icon: 'S',
+    atrMultiplier: 2.0,
+    tpFactor: 1.15,
+    decimals: 2,
+    entryGaps: [0.8, 2.0, 3.6],
+    trendThreshold: 1.3,
+    regressionLookback: 36,
+    momentumLookback: 8,
+    momentumWeight: 0.55
+  },
+
+  BTCUSDT: {
+    name: 'BITCOIN',
+    icon: '₿',
+    atrMultiplier: 1.2,
+    tpFactor: 1.05,
+    decimals: 1,
+    entryGaps: [0.6, 1.5, 2.6],
+    trendThreshold: 0.8,
+    regressionLookback: 50,
+    momentumLookback: 12,
+    momentumWeight: 0.40
+  },
+
+  ETHUSDT: {
+    name: 'ETHEREUM',
+    icon: 'Ξ',
+    atrMultiplier: 1.5,
+    tpFactor: 1.08,
+    decimals: 2,
+    entryGaps: [0.7, 1.8, 3.2],
+    trendThreshold: 1.0,
+    regressionLookback: 42,
+    momentumLookback: 10,
+    momentumWeight: 0.50
+  },
+
+  BNBUSDT: {
+    name: 'BNB CHAIN',
+    icon: 'B',
+    atrMultiplier: 1.5,
+    tpFactor: 1.08,
+    decimals: 2,
+    entryGaps: [0.7, 1.8, 3.2],
+    trendThreshold: 1.0,
+    regressionLookback: 42,
+    momentumLookback: 10,
+    momentumWeight: 0.50
+  },
+
+  LINKUSDT: {
+    name: 'CHAINLINK',
+    icon: 'L',
+    atrMultiplier: 2.2,
+    tpFactor: 1.18,
+    decimals: 3,
+    entryGaps: [0.9, 2.2, 4.0],
+    trendThreshold: 1.5,
+    regressionLookback: 34,
+    momentumLookback: 8,
+    momentumWeight: 0.55
+  },
+
+  SUIUSDT: {
+    name: 'SUI',
+    icon: 'S',
+    atrMultiplier: 2.0,
+    tpFactor: 1.12,
+    decimals: 4,
+    entryGaps: [0.8, 2.1, 3.8],
+    trendThreshold: 1.6,
+    regressionLookback: 30,
+    momentumLookback: 6,
+    momentumWeight: 0.60
+  },
 };
 
 // ---------- HÀM TOÁN HỌC CORE ----------
 
 function calculateEMA(data, period) {
   if (data.length < period) return data[data.length - 1];
+
   const k = 2 / (period + 1);
   let ema = data[0];
-  for (let i = 0; i < period; i++) ema += data[i];
+
+  for (let i = 0; i < period; i++) {
+    ema += data[i];
+  }
+
   ema = ema / period;
-  for (let i = period; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
+
+  for (let i = period; i < data.length; i++) {
+    ema = data[i] * k + ema * (1 - k);
+  }
+
   return ema;
 }
 
 function calculateATR(highs, lows, closes, period) {
   if (highs.length < period) return 0;
+
   const trs = [];
+
   for (let i = 1; i < highs.length; i++) {
-    trs.push(Math.max(
-      highs[i] - lows[i],
-      Math.abs(highs[i] - closes[i - 1]),
-      Math.abs(lows[i] - closes[i - 1])
-    ));
+    trs.push(
+      Math.max(
+        highs[i] - lows[i],
+        Math.abs(highs[i] - closes[i - 1]),
+        Math.abs(lows[i] - closes[i - 1])
+      )
+    );
   }
 
   let sum = 0;
-  for (let i = trs.length - period; i < trs.length; i++) sum += trs[i];
+
+  for (let i = trs.length - period; i < trs.length; i++) {
+    sum += trs[i];
+  }
+
   return sum / period;
 }
 
 function linearRegression(y) {
   const n = y.length;
-  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
 
   for (let i = 0; i < n; i++) {
     sumX += i;
@@ -92,13 +185,21 @@ function linearRegression(y) {
   }
 
   const denom = n * sumXX - sumX * sumX || 1;
-  const slope = (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / n;
+
+  const slope =
+    (n * sumXY - sumX * sumY) / denom;
+
+  const intercept =
+    (sumY - slope * sumX) / n;
+
   const meanY = sumY / n;
 
-  let ssTot = 0, ssRes = 0;
+  let ssTot = 0;
+  let ssRes = 0;
+
   for (let i = 0; i < n; i++) {
     const pred = intercept + slope * i;
+
     ssTot += Math.pow(y[i] - meanY, 2);
     ssRes += Math.pow(y[i] - pred, 2);
   }
@@ -106,11 +207,13 @@ function linearRegression(y) {
   return {
     slope,
     intercept,
-    r2: ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot),
+    r2: ssTot === 0
+      ? 0
+      : Math.max(0, 1 - ssRes / ssTot),
   };
 }
 
-// ---------- DỰ BÁO XU HƯỚNG + ĐỘ TIN CẬY ----------
+// ---------- DỰ BÁO XU HƯỚNG ----------
 
 function generateForecast(closes, currentPrice, atr, symbol) {
   const config = COINS_DATA[symbol] || {
@@ -122,35 +225,76 @@ function generateForecast(closes, currentPrice, atr, symbol) {
 
   const lookback = config.regressionLookback || 60;
   const sample = closes.slice(-lookback);
+
   const reg = linearRegression(sample);
   const n = sample.length;
-  const dailyStep = 24 / 4;
 
+  const dailyStep = 24 / 4;
   const predictions = [];
+
   for (let d = 1; d <= 7; d++) {
     const idx = n + dailyStep * d;
-    predictions.push(reg.intercept + reg.slope * idx);
+
+    predictions.push(
+      reg.intercept + reg.slope * idx
+    );
   }
 
-  const volFactor = Math.min(1, atr / Math.max(1, currentPrice));
-  let confidence = Math.max(0, reg.r2 * (1 - volFactor * 0.5));
-  if (isNaN(confidence)) confidence = 0;
+  const volFactor =
+    Math.min(1, atr / Math.max(1, currentPrice));
 
-  const confPercentNum = Math.round(confidence * 100);
-  const regChangePct = ((predictions[6] - currentPrice) / currentPrice) * 100;
+  let confidence =
+    Math.max(
+      0,
+      reg.r2 * (1 - volFactor * 0.5)
+    );
 
-  const momLookback = Math.min(closes.length - 1, config.momentumLookback || 10);
-  const pastClose = closes[closes.length - 1 - momLookback];
+  if (isNaN(confidence)) {
+    confidence = 0;
+  }
+
+  const confPercentNum =
+    Math.round(confidence * 100);
+
+  const regChangePct =
+    ((predictions[6] - currentPrice) /
+      currentPrice) * 100;
+
+  const momLookback =
+    Math.min(
+      closes.length - 1,
+      config.momentumLookback || 10
+    );
+
+  const pastClose =
+    closes[closes.length - 1 - momLookback];
+
   const momentumChangePct = pastClose
     ? ((currentPrice - pastClose) / pastClose) * 100
     : 0;
 
-  const momWeight = config.momentumWeight != null ? config.momentumWeight : 0.5;
-  const changePct = momentumChangePct * momWeight + regChangePct * (1 - momWeight);
+  const momWeight =
+    config.momentumWeight != null
+      ? config.momentumWeight
+      : 0.5;
 
-  const floorThreshold = config.trendThreshold || 1.2;
-  const volBasedThreshold = (atr / Math.max(1e-9, currentPrice)) * 100 * 0.6;
-  const trendThreshold = Math.max(floorThreshold, volBasedThreshold);
+  const changePct =
+    momentumChangePct * momWeight +
+    regChangePct * (1 - momWeight);
+
+  const floorThreshold =
+    config.trendThreshold || 1.2;
+
+  const volBasedThreshold =
+    (atr / Math.max(1e-9, currentPrice)) *
+    100 *
+    0.6;
+
+  const trendThreshold =
+    Math.max(
+      floorThreshold,
+      volBasedThreshold
+    );
 
   let trendLabel = 'SIDEWAY';
 
@@ -171,24 +315,46 @@ function generateForecast(closes, currentPrice, atr, symbol) {
   };
 }
 
-// ---------- LOGIC ENTRY DẢI DỰ PHÒNG ----------
+// ---------- ENTRY ----------
 
 function enforceEntrySpacing(entries, atr, gaps) {
-  const minGap12 = Math.max(0, gaps[1] - gaps[0]) * atr;
-  const minGap23 = Math.max(0, gaps[2] - gaps[1]) * atr;
+  const minGap12 =
+    Math.max(0, gaps[1] - gaps[0]) * atr;
 
-  if (entries[0].price - entries[1].price < minGap12) {
-    entries[1].price = entries[0].price - minGap12;
+  const minGap23 =
+    Math.max(0, gaps[2] - gaps[1]) * atr;
+
+  if (
+    entries[0].price -
+    entries[1].price <
+    minGap12
+  ) {
+    entries[1].price =
+      entries[0].price - minGap12;
   }
 
-  if (entries[1].price - entries[2].price < minGap23) {
-    entries[2].price = entries[1].price - minGap23;
+  if (
+    entries[1].price -
+    entries[2].price <
+    minGap23
+  ) {
+    entries[2].price =
+      entries[1].price - minGap23;
   }
 
   return entries;
 }
 
-function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital) {
+function generatePlan(
+  price,
+  e50,
+  e200,
+  atr,
+  high50,
+  symbol,
+  trendInfo,
+  capital
+) {
   const config = COINS_DATA[symbol] || {
     atrMultiplier: 1.5,
     tpFactor: 1.1,
@@ -196,29 +362,61 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
     entryGaps: [0.7, 1.8, 3.2],
   };
 
-  const gaps = config.entryGaps || [0.7, 1.8, 3.2];
+  const gaps =
+    config.entryGaps || [0.7, 1.8, 3.2];
 
-  let entry1Price, entry2Price, entry3Price;
-  let desc1, desc2, desc3;
+  let entry1Price;
+  let entry2Price;
+  let entry3Price;
 
-  const isDowntrendZone = price < e50 || price < e200;
+  let desc1;
+  let desc2;
+  let desc3;
+
+  const isDowntrendZone =
+    price < e50 || price < e200;
 
   if (isDowntrendZone) {
-    entry1Price = price - gaps[0] * atr;
-    entry2Price = price - gaps[1] * atr;
-    entry3Price = price - gaps[2] * atr;
+    entry1Price =
+      price - gaps[0] * atr;
 
-    if (entry1Price >= price) entry1Price = price * 0.98;
-    if (entry2Price >= entry1Price) entry2Price = entry1Price * 0.96;
-    if (entry3Price >= entry2Price) entry3Price = entry2Price * 0.94;
+    entry2Price =
+      price - gaps[1] * atr;
+
+    entry3Price =
+      price - gaps[2] * atr;
+
+    if (entry1Price >= price) {
+      entry1Price = price * 0.98;
+    }
+
+    if (entry2Price >= entry1Price) {
+      entry2Price = entry1Price * 0.96;
+    }
+
+    if (entry3Price >= entry2Price) {
+      entry3Price = entry2Price * 0.94;
+    }
 
     desc1 = 'Hỗ trợ 1';
     desc2 = 'Hỗ trợ 2';
     desc3 = 'Panic';
+
   } else {
-    entry1Price = price - gaps[0] * atr;
-    entry2Price = Math.min(e50, price - gaps[1] * atr);
-    entry3Price = Math.min(e200, price - gaps[2] * atr);
+    entry1Price =
+      price - gaps[0] * atr;
+
+    entry2Price =
+      Math.min(
+        e50,
+        price - gaps[1] * atr
+      );
+
+    entry3Price =
+      Math.min(
+        e200,
+        price - gaps[2] * atr
+      );
 
     desc1 = 'Pullback nhanh';
     desc2 = 'EMA50 / Pullback sâu';
@@ -226,216 +424,436 @@ function generatePlan(price, e50, e200, atr, high50, symbol, trendInfo, capital)
   }
 
   let entries = [
-    { desc: desc1, price: entry1Price, weight: 0.3 },
-    { desc: desc2, price: entry2Price, weight: 0.3 },
-    { desc: desc3, price: entry3Price, weight: 0.4 },
+    {
+      desc: desc1,
+      price: entry1Price,
+      weight: 0.3
+    },
+    {
+      desc: desc2,
+      price: entry2Price,
+      weight: 0.3
+    },
+    {
+      desc: desc3,
+      price: entry3Price,
+      weight: 0.4
+    },
   ].sort((a, b) => b.price - a.price);
 
-  entries = enforceEntrySpacing(entries, atr, gaps);
+  entries =
+    enforceEntrySpacing(
+      entries,
+      atr,
+      gaps
+    );
 
   entries.forEach((e, idx) => {
-    e.name = `Entry ${idx + 1} (${e.desc})`;
+    e.name =
+      `Entry ${idx + 1} (${e.desc})`;
   });
 
   let disabledCount = 0;
 
-  if (isDowntrendZone && trendInfo && trendInfo.trendLabel === 'DOWNTREND') {
-    disabledCount = trendInfo.confPercentNum >= 45 ? 2 : 1;
+  if (
+    isDowntrendZone &&
+    trendInfo &&
+    trendInfo.trendLabel === 'DOWNTREND'
+  ) {
+    disabledCount =
+      trendInfo.confPercentNum >= 45
+        ? 2
+        : 1;
   }
 
   entries.forEach((e, idx) => {
-    e.disabled = idx < disabledCount;
+    e.disabled =
+      idx < disabledCount;
   });
 
   const targetRR = 1.8;
 
   const results = entries.map((e) => {
-    const isPanic = e.name.includes('Panic') || e.name.includes('Entry 3');
+    const isPanic =
+      e.name.includes('Panic') ||
+      e.name.includes('Entry 3');
 
-    let stopLoss = e.price - config.atrMultiplier * atr;
-    if (stopLoss <= 0) stopLoss = Math.max(0, e.price * 0.85);
+    let stopLoss =
+      e.price -
+      config.atrMultiplier * atr;
 
-    const tpFromRR = e.price + (e.price - stopLoss) * targetRR;
+    if (stopLoss <= 0) {
+      stopLoss =
+        Math.max(
+          0,
+          e.price * 0.85
+        );
+    }
+
+    const tpFromRR =
+      e.price +
+      (e.price - stopLoss) *
+      targetRR;
+
     let finalTP;
 
     if (isDowntrendZone) {
-      finalTP = Math.max(tpFromRR, price * 1.03);
+      finalTP =
+        Math.max(
+          tpFromRR,
+          price * 1.03
+        );
     } else {
-      finalTP = Math.max(tpFromRR, high50 * 0.99);
+      finalTP =
+        Math.max(
+          tpFromRR,
+          high50 * 0.99
+        );
     }
 
-    const maxAllowedTP = e.price * config.tpFactor;
-    if (finalTP > maxAllowedTP) finalTP = maxAllowedTP;
+    const maxAllowedTP =
+      e.price * config.tpFactor;
+
+    if (finalTP > maxAllowedTP) {
+      finalTP = maxAllowedTP;
+    }
 
     return {
       name: e.name,
       price: e.price,
       weight: e.weight,
       capital: capital * e.weight,
-      stopLoss: isPanic ? stopLoss : null,
+      stopLoss:
+        isPanic ? stopLoss : null,
       takeProfit: finalTP,
       disabled: e.disabled,
     };
   });
 
-  return { entries: results, disabledCount, isDowntrendZone };
+  return {
+    entries: results,
+    disabledCount,
+    isDowntrendZone
+  };
 }
 
-// ---------- NETWORK LAYER ----------
+// ---------- NETWORK ----------
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
+  );
 }
 
 function isRetryableStatus(status) {
-  return status === 408 ||
+  return (
+    status === 408 ||
     status === 418 ||
     status === 425 ||
     status === 429 ||
     status === 500 ||
     status === 502 ||
     status === 503 ||
-    status === 504;
+    status === 504
+  );
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+async function fetchWithTimeout(
+  url,
+  options = {},
+  timeoutMs = REQUEST_TIMEOUT_MS
+) {
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      timeoutMs
+    );
 
   try {
     return await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Crypto-Swing-Bot/9.2',
+        'User-Agent':
+          'Crypto-Swing-Bot/9.3',
         ...(options.headers || {}),
       },
     });
+
   } catch (err) {
-    if (err && err.name === 'AbortError') {
-      throw new Error(`TIMEOUT sau ${timeoutMs}ms: ${url}`);
+    if (
+      err &&
+      err.name === 'AbortError'
+    ) {
+      throw new Error(
+        `TIMEOUT sau ${timeoutMs}ms: ${url}`
+      );
     }
+
     throw err;
+
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function fetchJSON(url, options = {}) {
+async function fetchJSON(
+  url,
+  options = {}
+) {
   let lastError = null;
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  for (
+    let attempt = 1;
+    attempt <= MAX_RETRIES;
+    attempt++
+  ) {
     try {
-      const res = await fetchWithTimeout(url, options);
+      const res =
+        await fetchWithTimeout(
+          url,
+          options
+        );
 
       if (res.ok) {
         return await res.json();
       }
 
-      const body = await res.text().catch(() => '');
+      const body =
+        await res.text()
+          .catch(() => '');
 
-      if (!isRetryableStatus(res.status) || attempt === MAX_RETRIES) {
-        throw new Error(`HTTP ${res.status} khi gọi ${url}${body ? ` - ${body.slice(0, 180)}` : ''}`);
+      if (
+        !isRetryableStatus(res.status) ||
+        attempt === MAX_RETRIES
+      ) {
+        throw new Error(
+          `HTTP ${res.status} khi gọi ${url}${
+            body
+              ? ` - ${body.slice(0, 180)}`
+              : ''
+          }`
+        );
       }
 
-      lastError = new Error(`HTTP ${res.status}`);
+      lastError =
+        new Error(
+          `HTTP ${res.status}`
+        );
+
     } catch (err) {
       lastError = err;
 
-      if (attempt === MAX_RETRIES) break;
+      if (
+        attempt === MAX_RETRIES
+      ) {
+        break;
+      }
     }
 
-    // Tăng thời gian chờ backoff nếu gặp lỗi 418/429
-    const wait = RETRY_BASE_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500);
-    console.warn(`⚠️ Retry ${attempt}/${MAX_RETRIES - 1}: ${url} — ${lastError.message} — chờ ${wait}ms`);
+    const wait =
+      RETRY_BASE_MS *
+      Math.pow(2, attempt - 1) +
+      Math.floor(
+        Math.random() * 500
+      );
+
+    console.warn(
+      `⚠️ Retry ${attempt}/${MAX_RETRIES - 1}: ${url} — ${
+        lastError.message
+      } — chờ ${wait}ms`
+    );
+
     await sleep(wait);
   }
 
-  throw lastError || new Error(`Không lấy được dữ liệu: ${url}`);
+  throw (
+    lastError ||
+    new Error(
+      `Không lấy được dữ liệu: ${url}`
+    )
+  );
 }
 
 async function fetchBinanceJSON(path) {
   let lastError = null;
 
-  for (const host of BINANCE_HOSTS) {
-    const url = `${host}${path}`;
+  for (
+    const host of BINANCE_HOSTS
+  ) {
+    const url =
+      `${host}${path}`;
 
     try {
-      const data = await fetchJSON(url);
+      const data =
+        await fetchJSON(url);
+
       return data;
+
     } catch (err) {
       lastError = err;
-      console.warn(`⚠️ Binance endpoint lỗi: ${host} — ${err.message}`);
+
+      console.warn(
+        `⚠️ Binance endpoint lỗi: ${host} — ${err.message}`
+      );
     }
   }
 
-  throw new Error(`Tất cả Binance endpoint đều lỗi. ${lastError ? lastError.message : ''}`);
+  throw new Error(
+    `Tất cả Binance endpoint đều lỗi. ${
+      lastError
+        ? lastError.message
+        : ''
+    }`
+  );
 }
 
+// ---------- TELEGRAM ----------
+
 async function sendTelegramMessage(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.');
+  if (
+    !TELEGRAM_BOT_TOKEN ||
+    !TELEGRAM_CHAT_ID
+  ) {
+    console.warn(
+      '⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — bỏ qua gửi Telegram.'
+    );
     return;
   }
 
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const url =
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-  await fetchJSON(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-    }),
-  });
+  await fetchJSON(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type':
+          'application/json',
+      },
+      body: JSON.stringify({
+        chat_id:
+          TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview:
+          true,
+      }),
+    }
+  );
 }
 
-// ---------- LẤY DỮ LIỆU BINANCE + PHÂN TÍCH 1 COIN ----------
+// ---------- ANALYZE COIN ----------
 
-async function analyzeCoin(symbol, capital) {
-  const config = COINS_DATA[symbol];
+async function analyzeCoin(
+  symbol,
+  capital
+) {
+  const config =
+    COINS_DATA[symbol];
 
   if (!config) {
-    throw new Error(`Không có cấu hình cho symbol ${symbol}`);
+    throw new Error(
+      `Không có cấu hình cho symbol ${symbol}`
+    );
   }
 
-  // Tối ưu: Chỉ gọi klines để giảm request (lấy giá hiện tại từ cây nến kline cuối)
-  const kData = await fetchBinanceJSON(`/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=300`);
+  const kData =
+    await fetchBinanceJSON(
+      `/api/v3/klines?symbol=${encodeURIComponent(
+        symbol
+      )}&interval=4h&limit=300`
+    );
 
-  if (!Array.isArray(kData) || kData.length < 200) {
-    throw new Error(`Kline ${symbol} không đủ dữ liệu: ${Array.isArray(kData) ? kData.length : 0}`);
+  if (
+    !Array.isArray(kData) ||
+    kData.length < 200
+  ) {
+    throw new Error(
+      `Kline ${symbol} không đủ dữ liệu: ${
+        Array.isArray(kData)
+          ? kData.length
+          : 0
+      }`
+    );
   }
 
-  const closes = kData.map((d) => parseFloat(d[4]));
-  const highs = kData.map((d) => parseFloat(d[2]));
-  const lows = kData.map((d) => parseFloat(d[3]));
+  const closes =
+    kData.map(
+      d => parseFloat(d[4])
+    );
 
-  const currentPrice = closes[closes.length - 1];
+  const highs =
+    kData.map(
+      d => parseFloat(d[2])
+    );
 
-  if (!Number.isFinite(currentPrice)) {
-    throw new Error(`Giá hiện tại ${symbol} không hợp lệ`);
+  const lows =
+    kData.map(
+      d => parseFloat(d[3])
+    );
+
+  const currentPrice =
+    closes[closes.length - 1];
+
+  if (
+    !Number.isFinite(
+      currentPrice
+    )
+  ) {
+    throw new Error(
+      `Giá hiện tại ${symbol} không hợp lệ`
+    );
   }
 
-  const ema50 = calculateEMA(closes, 50);
-  const ema200 = calculateEMA(closes, 200);
-  const atr = calculateATR(highs, lows, closes, 14);
-  const high50 = Math.max(...highs.slice(-50));
+  const ema50 =
+    calculateEMA(
+      closes,
+      50
+    );
 
-  const trendInfo = generateForecast(closes, currentPrice, atr, symbol);
-  const plan = generatePlan(
-    currentPrice,
-    ema50,
-    ema200,
-    atr,
-    high50,
-    symbol,
-    trendInfo,
-    capital
-  );
+  const ema200 =
+    calculateEMA(
+      closes,
+      200
+    );
+
+  const atr =
+    calculateATR(
+      highs,
+      lows,
+      closes,
+      14
+    );
+
+  const high50 =
+    Math.max(
+      ...highs.slice(-50)
+    );
+
+  const trendInfo =
+    generateForecast(
+      closes,
+      currentPrice,
+      atr,
+      symbol
+    );
+
+  const plan =
+    generatePlan(
+      currentPrice,
+      ema50,
+      ema200,
+      atr,
+      high50,
+      symbol,
+      trendInfo,
+      capital
+    );
 
   return {
     symbol,
@@ -449,34 +867,69 @@ async function analyzeCoin(symbol, capital) {
   };
 }
 
-// ---------- FORMAT TIN NHẮN TELEGRAM ----------
+// ---------- FORMAT TELEGRAM ----------
 
-function fmt(num, decimals) {
-  if (num === null || num === undefined || isNaN(num)) return '--';
-  return Number(num).toFixed(decimals);
+function fmt(
+  num,
+  decimals
+) {
+  if (
+    num === null ||
+    num === undefined ||
+    isNaN(num)
+  ) {
+    return '--';
+  }
+
+  return Number(num)
+    .toFixed(decimals);
 }
 
 function trendEmoji(label) {
-  if (label === 'UPTREND') return '🟢';
-  if (label === 'DOWNTREND') return '🔴';
-  if (label === 'NHIỄU (WEAK)') return '⚪';
+  if (
+    label === 'UPTREND'
+  ) {
+    return '🟢';
+  }
+
+  if (
+    label === 'DOWNTREND'
+  ) {
+    return '🔴';
+  }
+
+  if (
+    label === 'NHIỄU (WEAK)'
+  ) {
+    return '⚪';
+  }
+
   return '🟡';
 }
 
-function actionRecommendation(trendInfo) {
-  const c = trendInfo.confPercentNum;
+function actionRecommendation(
+  trendInfo
+) {
+  const c =
+    trendInfo.confPercentNum;
 
   if (c < 32) {
     return 'Đứng ngoài quan sát, chưa đủ cơ sở để kết luận xu hướng.';
   }
 
-  if (trendInfo.trendLabel === 'UPTREND') {
+  if (
+    trendInfo.trendLabel ===
+    'UPTREND'
+  ) {
     return c >= 70
       ? 'Xu hướng tăng RÕ RÀNG → có thể vào đủ 3 Entry (30/30/40%).'
       : 'Xu hướng tăng trung bình → cẩn trọng, ưu tiên Entry 2 & 3, hạn chế đuổi giá ở Entry 1.';
   }
 
-  if (trendInfo.trendLabel === 'DOWNTREND') {
+  if (
+    trendInfo.trendLabel ===
+    'DOWNTREND'
+  ) {
     return c >= 45
       ? 'Downtrend MẠNH & rõ ràng → tạm khoá 2 Entry gần giá, chỉ chờ Entry 3 (Panic) bắt đáy sâu.'
       : 'Downtrend đã xác nhận → tạm khoá Entry 1 (gần giá nhất) để tránh bắt dao rơi.';
@@ -485,170 +938,325 @@ function actionRecommendation(trendInfo) {
   return 'Đi ngang (SIDEWAY) → chưa có tín hiệu vào lệnh rõ ràng, tiếp tục theo dõi.';
 }
 
-function buildTelegramMessage(result) {
-  const { symbol, config, currentPrice, trendInfo, plan } = result;
-  const dec = config.decimals;
+function buildTelegramMessage(
+  result
+) {
+  const {
+    symbol,
+    config,
+    currentPrice,
+    trendInfo,
+    plan
+  } = result;
+
+  const dec =
+    config.decimals;
 
   const lines = [];
 
   lines.push(
-    `${trendEmoji(trendInfo.trendLabel)} <b>${config.name} (${symbol})</b> — <b>${trendInfo.trendLabel}</b> (Độ tin cậy: ${trendInfo.confPercentNum}%)`
+    `${trendEmoji(
+      trendInfo.trendLabel
+    )} <b>${config.name} (${symbol})</b> — <b>${
+      trendInfo.trendLabel
+    }</b> (Độ tin cậy: ${
+      trendInfo.confPercentNum
+    }%)`
   );
-  lines.push(`💰 Giá hiện tại: <b>${fmt(currentPrice, dec)}</b> USDT`);
-  lines.push(`📐 Ngưỡng xu hướng (%thay đổi tối thiểu để xác nhận trend): ${trendInfo.trendThreshold.toFixed(2)}%`);
+
+  lines.push(
+    `💰 Giá hiện tại: <b>${fmt(
+      currentPrice,
+      dec
+    )}</b> USDT`
+  );
+
+  lines.push(
+    `📐 Ngưỡng xu hướng (%thay đổi tối thiểu để xác nhận trend): ${trendInfo.trendThreshold.toFixed(
+      2
+    )}%`
+  );
+
   lines.push('');
-  lines.push('<b>📋 Kế hoạch DCA:</b>');
 
-  plan.entries.forEach((e) => {
-    const statusTag = e.disabled ? '  <i>· CHỜ</i>' : '';
+  lines.push(
+    '<b>📋 Kế hoạch DCA:</b>'
+  );
 
-    lines.push(`\n▫️ <b>${e.name}</b>${statusTag}`);
-    lines.push(`    💵 Giá vào: <b>${fmt(e.price, dec)}</b>`);
+  plan.entries.forEach(
+    e => {
+      const statusTag =
+        e.disabled
+          ? '  <i>· CHỜ</i>'
+          : '';
 
-    if (e.stopLoss !== null) {
-      lines.push(`    🛑 Stop-Loss: ${fmt(e.stopLoss, dec)}`);
+      lines.push(
+        `\n▫️ <b>${e.name}</b>${statusTag}`
+      );
+
+      lines.push(
+        `    💵 Giá vào: <b>${fmt(
+          e.price,
+          dec
+        )}</b>`
+      );
+
+      if (
+        e.stopLoss !== null
+      ) {
+        lines.push(
+          `    🛑 Stop-Loss: ${fmt(
+            e.stopLoss,
+            dec
+          )}`
+        );
+      }
+
+      if (!e.disabled) {
+        lines.push(
+          `    🎯 Take-Profit: ${fmt(
+            e.takeProfit,
+            dec
+          )}`
+        );
+      }
     }
+  );
 
-    if (!e.disabled) {
-      lines.push(`    🎯 Take-Profit: ${fmt(e.takeProfit, dec)}`);
-    }
-  });
-
-  if (plan.disabledCount > 0) {
+  if (
+    plan.disabledCount > 0
+  ) {
     lines.push('');
+
     lines.push(
-      `⚠️ ${plan.disabledCount === 2
-        ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).'
-        : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'}`
+      `⚠️ ${
+        plan.disabledCount === 2
+          ? 'Downtrend mạnh — đã khoá 2 Entry gần giá, chỉ chờ Entry sâu nhất (Panic).'
+          : 'Downtrend đã xác nhận — đã khoá Entry gần giá nhất để tránh mua đuổi.'
+      }`
     );
   }
 
   lines.push('');
-  lines.push(`🎯 <b>Khuyến nghị:</b> ${actionRecommendation(trendInfo)}`);
+
   lines.push(
-    `⏱ Cập nhật: ${new Date().toLocaleString('vi-VN', {
-      hour12: false,
-      timeZone: 'Asia/Ho_Chi_Minh',
-    })}`
+    `🎯 <b>Khuyến nghị:</b> ${actionRecommendation(
+      trendInfo
+    )}`
+  );
+
+  lines.push(
+    `⏱ Cập nhật: ${new Date().toLocaleString(
+      'vi-VN',
+      {
+        hour12: false,
+        timeZone:
+          'Asia/Ho_Chi_Minh',
+      }
+    )}`
   );
 
   return lines.join('\n');
 }
 
-// ---------- TELEGRAM CONFIG ----------
+// ---------- TELEGRAM VERIFY ----------
 
 async function verifyTelegramConfig() {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('⚠️ Telegram chưa được cấu hình đầy đủ.');
+  if (
+    !TELEGRAM_BOT_TOKEN ||
+    !TELEGRAM_CHAT_ID
+  ) {
+    console.warn(
+      '⚠️ Telegram chưa được cấu hình đầy đủ.'
+    );
     return;
   }
 
   try {
-    const data = await fetchJSON(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`
-    );
+    const data =
+      await fetchJSON(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`
+      );
 
-    if (data && data.ok) {
-      console.log(`✅ Telegram OK — bot: @${data.result.username}`);
+    if (
+      data &&
+      data.ok
+    ) {
+      console.log(
+        `✅ Telegram OK — bot: @${data.result.username}`
+      );
     } else {
-      console.error('❌ Telegram getMe trả về lỗi.');
+      console.error(
+        '❌ Telegram getMe trả về lỗi.'
+      );
     }
+
   } catch (err) {
-    console.error(`⚠️ Không kiểm tra được Telegram lúc startup: ${err.message}`);
+    console.error(
+      `⚠️ Không kiểm tra được Telegram lúc startup: ${err.message}`
+    );
   }
 }
 
+// ---------- TIME ----------
+
 function nowStr() {
-  return new Date().toLocaleString('vi-VN', {
-    hour12: false,
-    timeZone: 'Asia/Ho_Chi_Minh',
-  });
+  return new Date().toLocaleString(
+    'vi-VN',
+    {
+      hour12: false,
+      timeZone:
+        'Asia/Ho_Chi_Minh',
+    }
+  );
 }
 
 // ---------- SCAN ----------
 
 async function runScanCycle() {
   if (scanPromise) {
-    console.log(`ℹ️ [${nowStr()}] Scan đang chạy — bỏ qua lần kích hoạt trùng.`);
+    console.log(
+      `ℹ️ [${nowStr()}] Scan đang chạy — bỏ qua lần kích hoạt trùng.`
+    );
+
     return scanPromise;
   }
 
-  scanPromise = (async () => {
-    console.log(`\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.2...`);
+  scanPromise =
+    (async () => {
+      console.log(
+        `\n🔍 [${nowStr()}] Bắt đầu tiến trình quét v9.3...`
+      );
 
-    let successCount = 0;
-    let errorCount = 0;
-    let signalCount = 0;
-    const runSignals = [];
-    const runErrors = [];
+      let successCount = 0;
+      let errorCount = 0;
+      let signalCount = 0;
 
-    for (const symbol of SYMBOLS) {
-      let trendInfo = null;
+      const runSignals = [];
+      const runErrors = [];
 
-      try {
-        const result = await analyzeCoin(symbol, CAPITAL);
-        trendInfo = result.trendInfo;
-
-        const isActionable =
-          trendInfo.trendLabel === 'UPTREND' ||
-          trendInfo.trendLabel === 'DOWNTREND';
-
-        if (!isActionable || trendInfo.confPercentNum < MIN_CONFIDENCE) {
-          console.log(
-            `ℹ️ ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendInfo.confPercentNum}%). Bỏ qua.`
-          );
-          successCount++;
-          continue;
-        }
-
-        const message = buildTelegramMessage(result);
+      for (
+        const symbol of SYMBOLS
+      ) {
+        let trendInfo = null;
 
         try {
-          await sendTelegramMessage(message);
-        } catch (sendErr) {
-          // Tách riêng lỗi GỬI TELEGRAM khỏi lỗi phân tích, để /status cho biết
-          // rõ đây là vấn đề kết nối/cấu hình Telegram, không phải lỗi tính toán.
+          console.log(
+            `🔎 [${nowStr()}] Đang phân tích ${symbol}...`
+          );
+
+          const result =
+            await analyzeCoin(
+              symbol,
+              CAPITAL
+            );
+
+          trendInfo =
+            result.trendInfo;
+
+          const isActionable =
+            trendInfo.trendLabel ===
+              'UPTREND' ||
+            trendInfo.trendLabel ===
+              'DOWNTREND';
+
+          if (
+            !isActionable ||
+            trendInfo.confPercentNum <
+              MIN_CONFIDENCE
+          ) {
+            console.log(
+              `ℹ️ ${symbol}: Đang Sideway hoặc độ tin cậy chưa đủ (${trendInfo.confPercentNum}%). Bỏ qua.`
+            );
+
+            successCount++;
+            continue;
+          }
+
+          const message =
+            buildTelegramMessage(
+              result
+            );
+
+          try {
+            await sendTelegramMessage(
+              message
+            );
+
+          } catch (sendErr) {
+            errorCount++;
+
+            runErrors.push({
+              symbol,
+              stage:
+                'send_telegram',
+              message:
+                sendErr.message
+            });
+
+            console.error(
+              `❌ ${symbol}: Tín hiệu đã tính xong nhưng GỬI TELEGRAM THẤT BẠI — ${sendErr.message}`
+            );
+
+            await sleep(1500);
+
+            continue;
+          }
+
+          successCount++;
+          signalCount++;
+
+          runSignals.push({
+            symbol,
+            trendLabel:
+              trendInfo.trendLabel,
+            confidence:
+              trendInfo.confPercentNum
+          });
+
+          console.log(
+            `✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`
+          );
+
+        } catch (err) {
           errorCount++;
-          runErrors.push({ symbol, stage: 'send_telegram', message: sendErr.message });
-          console.error(`❌ ${symbol}: Tín hiệu đã tính xong nhưng GỬI TELEGRAM THẤT BẠI — ${sendErr.message}`);
-          await sleep(1500);
-          continue;
+
+          runErrors.push({
+            symbol,
+            stage: 'analyze',
+            message:
+              err.message
+          });
+
+          console.error(
+            `❌ ${symbol}: Lỗi khi phân tích — ${err.message}`
+          );
         }
 
-        successCount++;
-        signalCount++;
-        runSignals.push({ symbol, trendLabel: trendInfo.trendLabel, confidence: trendInfo.confPercentNum });
-
-        console.log(
-          `✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`
-        );
-      } catch (err) {
-        errorCount++;
-        runErrors.push({ symbol, stage: 'analyze', message: err.message });
-        console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
+        await sleep(1500);
       }
 
-      // Tăng delay lên 1.5s giữa các coin để tránh bùng nổ Request Weight
-      await sleep(1500);
-    }
+      lastRunInfo = {
+        time: nowStr(),
+        symbolsScanned:
+          SYMBOLS.length,
+        successCount,
+        errorCount,
+        signalCount,
+        signals:
+          runSignals,
+        errors:
+          runErrors,
+      };
 
-    lastRunInfo = {
-      time: nowStr(),
-      symbolsScanned: SYMBOLS.length,
-      successCount,
-      errorCount,
-      signalCount,
-      signals: runSignals,
-      errors: runErrors,
-    };
-
-    console.log(
-      `🏁 [${nowStr()}] Kết thúc scan — OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
-    );
-  })();
+      console.log(
+        `🏁 [${nowStr()}] Kết thúc scan — OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
+      );
+    })();
 
   try {
     await scanPromise;
+
   } finally {
     scanPromise = null;
   }
@@ -656,104 +1264,300 @@ async function runScanCycle() {
 
 // ---------- HTTP SERVER ----------
 
-function sendText(res, statusCode, text) {
-  res.writeHead(statusCode, {
-    'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'Connection': 'close',
-  });
+function sendText(
+  res,
+  statusCode,
+  text
+) {
+  res.writeHead(
+    statusCode,
+    {
+      'Content-Type':
+        'text/plain; charset=utf-8',
+
+      'Cache-Control':
+        'no-store',
+
+      'Connection':
+        'close',
+    }
+  );
+
   res.end(text);
 }
 
-const server = http.createServer((req, res) => {
-  let pathname = '/';
+const server =
+  http.createServer(
+    (req, res) => {
+      let pathname = '/';
 
-  try {
-    pathname = new URL(req.url || '/', 'http://localhost').pathname;
-  } catch (_) {
-    pathname = '/';
-  }
+      try {
+        pathname =
+          new URL(
+            req.url || '/',
+            'http://localhost'
+          ).pathname;
 
-  if (pathname === '/favicon.ico') {
-    res.writeHead(204);
-    return res.end();
-  }
+      } catch (_) {
+        pathname = '/';
+      }
 
-  if (req.method === 'HEAD') {
-    return sendText(res, 200, 'OK');
-  }
+      if (
+        pathname ===
+        '/favicon.ico'
+      ) {
+        res.writeHead(
+          204
+        );
 
-  if (pathname === '/' || pathname === '/ping' || pathname === '/health') {
-    return sendText(res, 200, 'OK');
-  }
+        return res.end();
+      }
 
-  if (pathname === '/status') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'Connection': 'close',
-    });
-    return res.end(JSON.stringify({
-      scanRunningNow: Boolean(scanPromise),
-      telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
-      lastRun: lastRunInfo,
-    }, null, 2));
-  }
+      if (
+        req.method === 'HEAD'
+      ) {
+        return sendText(
+          res,
+          200,
+          'OK'
+        );
+      }
 
-  if (pathname === '/test-telegram') {
-    console.log(`\n🧪 [${nowStr()}] Nhận request /test-telegram — gửi tin nhắn thử...`);
+      // ---------- HEALTH ----------
+      if (
+        pathname === '/' ||
+        pathname === '/ping' ||
+        pathname === '/health'
+      ) {
+        return sendText(
+          res,
+          200,
+          'OK'
+        );
+      }
 
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-      return sendText(res, 200, 'TELEGRAM_NOT_CONFIGURED: thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong Environment Variables trên Render.');
+      // ---------- STATUS ----------
+      if (
+        pathname === '/status'
+      ) {
+        res.writeHead(
+          200,
+          {
+            'Content-Type':
+              'application/json; charset=utf-8',
+
+            'Cache-Control':
+              'no-store',
+
+            'Connection':
+              'close',
+          }
+        );
+
+        return res.end(
+          JSON.stringify(
+            {
+              scanRunningNow:
+                Boolean(
+                  scanPromise
+                ),
+
+              telegramConfigured:
+                Boolean(
+                  TELEGRAM_BOT_TOKEN &&
+                  TELEGRAM_CHAT_ID
+                ),
+
+              lastRun:
+                lastRunInfo,
+
+              serverTime:
+                nowStr(),
+            },
+            null,
+            2
+          )
+        );
+      }
+
+      // ---------- SCAN STATUS ----------
+      if (
+        pathname ===
+        '/scan-status'
+      ) {
+        const running =
+          Boolean(
+            scanPromise
+          );
+
+        return sendText(
+          res,
+          200,
+          JSON.stringify(
+            {
+              status:
+                running
+                  ? 'RUNNING'
+                  : 'IDLE',
+
+              scanRunningNow:
+                running,
+
+              lastRun:
+                lastRunInfo,
+
+              time:
+                nowStr(),
+            },
+            null,
+            2
+          )
+        );
+      }
+
+      // ---------- TEST TELEGRAM ----------
+      if (
+        pathname ===
+        '/test-telegram'
+      ) {
+        console.log(
+          `\n🧪 [${nowStr()}] Nhận request /test-telegram — gửi tin nhắn thử...`
+        );
+
+        if (
+          !TELEGRAM_BOT_TOKEN ||
+          !TELEGRAM_CHAT_ID
+        ) {
+          return sendText(
+            res,
+            200,
+            'TELEGRAM_NOT_CONFIGURED: thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong Environment Variables trên Render.'
+          );
+        }
+
+        sendTelegramMessage(
+          `🧪 Test message — bot còn sống lúc ${nowStr()}`
+        )
+          .then(() =>
+            sendText(
+              res,
+              200,
+              'TELEGRAM_TEST_OK: đã gửi tin nhắn thành công, kiểm tra Telegram của bạn.'
+            )
+          )
+          .catch(err =>
+            sendText(
+              res,
+              200,
+              `TELEGRAM_TEST_FAILED: ${err.message}`
+            )
+          );
+
+        return;
+      }
+
+      // ---------- SCAN ----------
+      if (
+        pathname === '/scan'
+      ) {
+        const alreadyRunning =
+          Boolean(
+            scanPromise
+          );
+
+        console.log(
+          `\n🔔 [${nowStr()}] Nhận request /scan từ Cron/HTTP — ${
+            alreadyRunning
+              ? 'scan đang chạy'
+              : 'bắt đầu scan'
+          }`
+        );
+
+        // /scan chỉ nhận lệnh và trả response ngay.
+        // Scan tiếp tục chạy background.
+        if (
+          !alreadyRunning
+        ) {
+          runScanCycle()
+            .then(() => {
+              console.log(
+                `✅ [${nowStr()}] /scan hoàn tất — kiểm tra Telegram và /status.`
+              );
+            })
+            .catch(err => {
+              console.error(
+                `❌ Lỗi scan ngoài dự kiến: ${err.message}`
+              );
+            });
+        }
+
+        return sendText(
+          res,
+          200,
+          alreadyRunning
+            ? 'SCAN_IN_PROGRESS'
+            : 'SCAN_STARTED'
+        );
+      }
+
+      return sendText(
+        res,
+        200,
+        'OK'
+      );
     }
+  );
 
-    sendTelegramMessage(`🧪 Test message — bot còn sống lúc ${nowStr()}`)
-      .then(() => sendText(res, 200, 'TELEGRAM_TEST_OK: đã gửi tin nhắn thành công, kiểm tra Telegram của bạn.'))
-      .catch((err) => sendText(res, 200, `TELEGRAM_TEST_FAILED: ${err.message}`));
+// ---------- SERVER CONFIG ----------
 
-    return;
+server.on(
+  'error',
+  err => {
+    console.error(
+      `❌ HTTP Server error: ${err.message}`
+    );
   }
+);
 
-  if (pathname === '/scan') {
-    const alreadyRunning = Boolean(scanPromise);
+server.keepAliveTimeout =
+  5000;
+
+server.headersTimeout =
+  6000;
+
+server.listen(
+  PORT,
+  '0.0.0.0',
+  () => {
+    console.log(
+      `🌐 Web Server đã khởi chạy trên 0.0.0.0:${PORT}`
+    );
 
     console.log(
-      `\n🔔 [${nowStr()}] Nhận request /scan từ Cron/HTTP — ${alreadyRunning ? 'scan đang chạy' : 'bắt đầu scan'}`
+      `🔗 Health: /ping`
     );
 
-    if (!alreadyRunning) {
-      runScanCycle().catch((err) => {
-        console.error(`❌ Lỗi scan ngoài dự kiến: ${err.message}`);
-      });
-    }
+    console.log(
+      `🔗 Scan:   /scan`
+    );
 
-    return sendText(
-      res,
-      200,
-      alreadyRunning
-        ? 'SCAN_IN_PROGRESS'
-        : 'SCAN_STARTED'
+    console.log(
+      `🔗 Status: /status`
+    );
+
+    console.log(
+      `🔗 Scan status: /scan-status`
+    );
+
+    console.log(
+      `🔗 Test: /test-telegram`
+    );
+
+    console.log(
+      `⏱ Chế độ scan: nhận lệnh từ Cron-job.org qua /scan`
     );
   }
-
-  return sendText(res, 200, 'OK');
-});
-
-server.on('error', (err) => {
-  console.error(`❌ HTTP Server error: ${err.message}`);
-});
-
-server.keepAliveTimeout = 5000;
-server.headersTimeout = 6000;
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Web Server đã khởi chạy trên 0.0.0.0:${PORT}`);
-  console.log(`🔗 Health: /ping`);
-  console.log(`🔗 Scan:   /scan`);
-  console.log(`🔗 Status: /status`);
-  console.log(`🔗 Test:   /test-telegram`);
-  console.log(`⏱ Chế độ scan: CHỈ nhận lệnh từ Cron-job.org qua /scan`);
-});
+);
 
 // ---------- STARTUP ----------
 
@@ -763,10 +1567,22 @@ server.listen(PORT, '0.0.0.0', () => {
 
 // ---------- PROCESS ERROR HANDLING ----------
 
-process.on('unhandledRejection', (reason) => {
-  console.error('❌ Unhandled Promise Rejection:', reason);
-});
+process.on(
+  'unhandledRejection',
+  reason => {
+    console.error(
+      '❌ Unhandled Promise Rejection:',
+      reason
+    );
+  }
+);
 
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
-});
+process.on(
+  'uncaughtException',
+  err => {
+    console.error(
+      '❌ Uncaught Exception:',
+      err
+    );
+  }
+);
