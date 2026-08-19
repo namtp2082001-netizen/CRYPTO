@@ -31,6 +31,17 @@ const BINANCE_HOSTS = [
 
 let scanPromise = null;
 
+// Lưu lại tóm tắt lần scan gần nhất để phục vụ chẩn đoán qua /status
+let lastRunInfo = {
+  time: null,
+  symbolsScanned: 0,
+  successCount: 0,
+  errorCount: 0,
+  signalCount: 0,
+  signals: [],   // danh sách coin đã gửi Telegram thành công
+  errors: [],    // { symbol, message } các lỗi gặp phải (bao gồm lỗi gửi Telegram)
+};
+
 // ---------- COINS_DATA ----------
 const COINS_DATA = {
   SOLUSDT: { name: 'SOLANA', icon: 'S', atrMultiplier: 2.0, tpFactor: 1.15, decimals: 2, entryGaps: [0.8, 2.0, 3.6], trendThreshold: 1.3, regressionLookback: 36, momentumLookback: 8, momentumWeight: 0.55 },
@@ -568,11 +579,15 @@ async function runScanCycle() {
     let successCount = 0;
     let errorCount = 0;
     let signalCount = 0;
+    const runSignals = [];
+    const runErrors = [];
 
     for (const symbol of SYMBOLS) {
+      let trendInfo = null;
+
       try {
         const result = await analyzeCoin(symbol, CAPITAL);
-        const { trendInfo } = result;
+        trendInfo = result.trendInfo;
 
         const isActionable =
           trendInfo.trendLabel === 'UPTREND' ||
@@ -588,22 +603,44 @@ async function runScanCycle() {
 
         const message = buildTelegramMessage(result);
 
-        await sendTelegramMessage(message);
+        try {
+          await sendTelegramMessage(message);
+        } catch (sendErr) {
+          // Tách riêng lỗi GỬI TELEGRAM khỏi lỗi phân tích, để /status cho biết
+          // rõ đây là vấn đề kết nối/cấu hình Telegram, không phải lỗi tính toán.
+          errorCount++;
+          runErrors.push({ symbol, stage: 'send_telegram', message: sendErr.message });
+          console.error(`❌ ${symbol}: Tín hiệu đã tính xong nhưng GỬI TELEGRAM THẤT BẠI — ${sendErr.message}`);
+          await sleep(1500);
+          continue;
+        }
 
         successCount++;
         signalCount++;
+        runSignals.push({ symbol, trendLabel: trendInfo.trendLabel, confidence: trendInfo.confPercentNum });
 
         console.log(
           `✅ ${symbol}: Tín hiệu ${trendInfo.trendLabel} (${trendInfo.confPercentNum}%) — Đã gửi Telegram.`
         );
       } catch (err) {
         errorCount++;
+        runErrors.push({ symbol, stage: 'analyze', message: err.message });
         console.error(`❌ ${symbol}: Lỗi khi phân tích — ${err.message}`);
       }
 
       // Tăng delay lên 1.5s giữa các coin để tránh bùng nổ Request Weight
       await sleep(1500);
     }
+
+    lastRunInfo = {
+      time: nowStr(),
+      symbolsScanned: SYMBOLS.length,
+      successCount,
+      errorCount,
+      signalCount,
+      signals: runSignals,
+      errors: runErrors,
+    };
 
     console.log(
       `🏁 [${nowStr()}] Kết thúc scan — OK: ${successCount}, Lỗi: ${errorCount}, Tín hiệu gửi: ${signalCount}`
@@ -650,6 +687,33 @@ const server = http.createServer((req, res) => {
     return sendText(res, 200, 'OK');
   }
 
+  if (pathname === '/status') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Connection': 'close',
+    });
+    return res.end(JSON.stringify({
+      scanRunningNow: Boolean(scanPromise),
+      telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+      lastRun: lastRunInfo,
+    }, null, 2));
+  }
+
+  if (pathname === '/test-telegram') {
+    console.log(`\n🧪 [${nowStr()}] Nhận request /test-telegram — gửi tin nhắn thử...`);
+
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+      return sendText(res, 200, 'TELEGRAM_NOT_CONFIGURED: thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong Environment Variables trên Render.');
+    }
+
+    sendTelegramMessage(`🧪 Test message — bot còn sống lúc ${nowStr()}`)
+      .then(() => sendText(res, 200, 'TELEGRAM_TEST_OK: đã gửi tin nhắn thành công, kiểm tra Telegram của bạn.'))
+      .catch((err) => sendText(res, 200, `TELEGRAM_TEST_FAILED: ${err.message}`));
+
+    return;
+  }
+
   if (pathname === '/scan') {
     const alreadyRunning = Boolean(scanPromise);
 
@@ -686,6 +750,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Web Server đã khởi chạy trên 0.0.0.0:${PORT}`);
   console.log(`🔗 Health: /ping`);
   console.log(`🔗 Scan:   /scan`);
+  console.log(`🔗 Status: /status`);
+  console.log(`🔗 Test:   /test-telegram`);
   console.log(`⏱ Chế độ scan: CHỈ nhận lệnh từ Cron-job.org qua /scan`);
 });
 
